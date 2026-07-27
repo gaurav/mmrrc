@@ -128,6 +128,67 @@ not independent alleles.
 - 23 gene symbols map to more than one MGI id; 19 genes appear on more than one
   chromosome value.
 
+### Phenotypes: `MPT_IDS` and the Mammalian Phenotype Ontology
+
+`MPT_IDS` holds pipe-separated `label [MP:id]` pairs. 4,604 strains are annotated
+(**6.6% of 69,388** — absence means absence of characterisation, not absence of an
+effect), 46,860 entries, 5,463 distinct MP terms once repaired. Annotated strains
+skew to targeted mutations (2,666 `TM` vs 374 `CI`).
+
+**The MP ids in this column are wrong for ~14% of entries — do not join on them.**
+MMRRC's export splits any label containing a comma, and from the first split
+onward each label is paired with the *next* term's id. Filed upstream as
+[issue #1](https://github.com/gaurav/mmrrc/issues/1). Label/id agreement before
+the first split is 95.8%; after it, 15.1%.
+
+Recovery (implemented in the notebook's `strain_phenotypes` cell):
+
+1. Build a lookup of normalised `rdfs:label` **and** `oboInOwl:hasExactSynonym`
+   → MP id. Normalise with `re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()` so
+   `alpha-beta` and `alpha beta` agree.
+2. Rejoin greedily: at each position try comma-joining the next 4, 3, then 2
+   entries' labels; if a join resolves to exactly one term, take it. Longest match
+   first — a few labels split into three parts.
+3. Resolve by label, with two exceptions: before any split in that list the id is
+   still aligned, so a truncated label whose id names `<label>, …` keeps the id
+   (this preserves `, complete penetrance`); and a label that resolves to nothing
+   falls back to the id.
+
+Result: 97.9% resolve by label, 1.3% keep a more specific id, 0.8% fall back,
+**0 unresolved**, 6,530 entries re-pointed.
+
+MMRRC's labels are also a stale snapshot — matching synonyms as well as labels
+absorbs most of the drift (`aggression towards males` → `aggression towards male
+mice`). Always display the ontology's label, never the catalog's.
+
+Watch for `MP:0002169` "no abnormal phenotype detected" — 442 strains, the second
+most common entry. It is a negative result, not a phenotype. The ontology files
+it under *normal phenotype*, which is the cheapest way to spot it.
+
+### Parsing `data/mp.owl`
+
+101 MB RDF/XML (gitignored), 15,288 MP terms (457 obsolete) plus merged
+PATO/UBERON/GO/CHEBI/CL imports — 126,454 `owl:Class` elements in total.
+
+**No ontology library needed.** A single `xml.etree.ElementTree.iterparse` pass
+pulling `owl:Class` elements whose `rdf:about` starts with `…/obo/MP_` takes
+~1.5 s — fast enough to run live in a cell. `rdflib`/`pronto`/`owlready2` would
+all be slower and add a dependency.
+
+Two traps:
+
+- **Only `el.clear()` the `owl:Class` elements.** Clearing every element wipes
+  child text before the parent's `end` event can read it, and `findtext` silently
+  returns `''` instead of the label. Cost a debugging round.
+- Take **named parents only** from `rdfs:subClassOf` — read `rdf:resource` and
+  skip the anonymous `owl:Restriction` children, which carry no resource.
+
+The 28 children of `MP:0000001` "mammalian phenotype" are the body-system
+categories (adipose tissue, behavior/neurological, … vision/eye) — the natural
+grouping level. **MP is a DAG, not a tree**: 4,477 terms have more than one
+parent, a mean of 1.49 categories per term and up to 5. Category counts therefore
+overlap and never sum to the total; say so wherever they are displayed.
+
 ### Code legends
 
 Verified against https://www.mmrrc.org/methods/data_download.php.
