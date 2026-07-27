@@ -1,3 +1,10 @@
+# /// script
+# requires-python = ">=3.13"
+# dependencies = [
+#     "marimo>=0.23.15",
+# ]
+# ///
+
 import marimo
 
 __generated_with = "0.23.15"
@@ -8,18 +15,19 @@ app = marimo.App(width="medium")
 def _():
     import marimo as mo
     import polars as pl
+    import gzip
     import re
     import xml.etree.ElementTree as ET
     from collections import defaultdict, deque
     from pathlib import Path
     from urllib.parse import quote_plus
 
-    return ET, Path, defaultdict, deque, mo, pl, quote_plus, re
+    return ET, Path, defaultdict, deque, gzip, mo, pl, quote_plus, re
 
 
 @app.cell
 def _(Path, mo, pl):
-    CATALOG_CSV = Path("../data/mmrrc_catalog_data.csv")
+    CATALOG_CSV = Path("../data/mmrrc_catalog_data.csv.gz")
 
     catalog = pl.read_csv(CATALOG_CSV).rename(str.strip)
     mo.md(f"**{CATALOG_CSV.name}**: {catalog.height:,} rows x {catalog.width} columns")
@@ -460,8 +468,8 @@ def _(mo):
 
 
 @app.cell
-def _(ET, Path, defaultdict, deque, mo, pl):
-    MP_OWL = Path("../data/mp.owl")
+def _(ET, Path, defaultdict, deque, gzip, mo, pl):
+    MP_OWL = Path("../data/mp.owl.gz")
     MP_ROOT = "MP:0000001"
 
     _OBO = "http://purl.obolibrary.org/obo/"
@@ -473,27 +481,28 @@ def _(ET, Path, defaultdict, deque, mo, pl):
     mp_obsolete = set()
     mp_parents = defaultdict(list)
 
-    # One streaming pass over 101 MB of RDF/XML, ~1.5s -- no ontology library needed.
-    # Only clear owl:Class elements: clearing every element wipes child text before
-    # the parent's end event can read it.
-    for _ev, _el in ET.iterparse(MP_OWL, events=("end",)):
-        if _el.tag != _OWL + "Class":
-            continue
-        _about = _el.get(_RDF + "about", "")
-        if _about.startswith(_OBO + "MP_"):
-            _cid = "MP:" + _about.rsplit("MP_", 1)[1]
-            _label = _el.findtext(_RDFS + "label")
-            if _label:
-                mp_labels[_cid] = _label
-            if _el.findtext(_OWL + "deprecated") == "true":
-                mp_obsolete.add(_cid)
-            for _sub in _el.findall(_RDFS + "subClassOf"):
-                # Named parents only; anonymous owl:Restriction children carry no
-                # rdf:resource and are skipped.
-                _r = _sub.get(_RDF + "resource")
-                if _r and _r.startswith(_OBO + "MP_"):
-                    mp_parents[_cid].append("MP:" + _r.rsplit("MP_", 1)[1])
-        _el.clear()
+    # One streaming pass over 101 MB of RDF/XML (5 MB gzipped), ~1.5s -- no ontology
+    # library needed. Only clear owl:Class elements: clearing every element wipes
+    # child text before the parent's end event can read it.
+    with gzip.open(MP_OWL) as _fh:
+        for _ev, _el in ET.iterparse(_fh, events=("end",)):
+            if _el.tag != _OWL + "Class":
+                continue
+            _about = _el.get(_RDF + "about", "")
+            if _about.startswith(_OBO + "MP_"):
+                _cid = "MP:" + _about.rsplit("MP_", 1)[1]
+                _label = _el.findtext(_RDFS + "label")
+                if _label:
+                    mp_labels[_cid] = _label
+                if _el.findtext(_OWL + "deprecated") == "true":
+                    mp_obsolete.add(_cid)
+                for _sub in _el.findall(_RDFS + "subClassOf"):
+                    # Named parents only; anonymous owl:Restriction children carry no
+                    # rdf:resource and are skipped.
+                    _r = _sub.get(_RDF + "resource")
+                    if _r and _r.startswith(_OBO + "MP_"):
+                        mp_parents[_cid].append("MP:" + _r.rsplit("MP_", 1)[1])
+            _el.clear()
 
     # The 28 children of "mammalian phenotype" -- the body-system grouping.
     mp_categories = {
