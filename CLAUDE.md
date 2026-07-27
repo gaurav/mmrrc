@@ -595,3 +595,30 @@ multiple CRFs.
 ## Session state
 
 `__marimo__/session/` is ephemeral — it is gitignored. Do not commit it.
+
+## Exporting for GitHub
+
+`gene-mapper/gene-mapper-notebook.ipynb` is a generated artifact, regenerated with:
+
+```bash
+cd gene-mapper && marimo export ipynb gene-mapper-notebook.py \
+  -o gene-mapper-notebook.ipynb --include-outputs --force
+```
+
+**Regenerate it after any change to the notebook** — nothing does this
+automatically, so it goes stale silently. It needs `data/` present, since
+`--include-outputs` actually runs the notebook (~4s).
+
+What survives on GitHub: every `mo.md` cell, which is where the analysis and all
+the findings live. What does not: `mo.ui.table` and `mo.ui.multiselect` render as
+`<marimo-table>` / `<marimo-multiselect>` custom elements holding their data in
+`data-*` attributes, with no fallback content — GitHub strips them and shows
+nothing. Cells that mix prose and a widget in one `mo.vstack` keep the prose and
+lose the widget.
+
+`marimo export md` has **no** `--include-outputs` option — it is a source-only
+export, so the `mo.md(...)` narrative appears as code rather than rendered prose.
+Worse than the ipynb for this purpose.
+
+For a fully interactive published copy, `marimo export html-wasm` on GitHub Pages
+is the option; nothing in-repo will render the widgets.
