@@ -449,17 +449,18 @@ def _(mo):
     Ontology, to group phenotypes under their parent categories and see which areas
     of mouse biology the collection actually covers.
 
-    **The MP ids in this column cannot be used as-is.** MMRRC's export splits labels
-    that contain a comma, and from the first split onwards every remaining label in
-    that strain's list is paired with the *next* term's id. Roughly one in seven
-    annotations is attached to the wrong term. The cells below re-derive each id from
-    its label instead; the highlights at the end of the section show the evidence.
+    **Only the ids in that column are usable.** MMRRC's export re-splits the joined
+    label string on `", "`, so any phenotype name containing a comma is torn in two
+    and the tail of each affected list is lost. The ids are untouched, so the cells
+    below read ids only and take every label from the ontology. The highlights at the
+    end of the section show the evidence
+    ([issue #1](https://github.com/gaurav/mmrrc/issues/1)).
     """)
     return
 
 
 @app.cell
-def _(ET, Path, defaultdict, deque, mo, pl, re):
+def _(ET, Path, defaultdict, deque, mo, pl):
     MP_OWL = Path("../data/mp.owl")
     MP_ROOT = "MP:0000001"
 
@@ -467,18 +468,10 @@ def _(ET, Path, defaultdict, deque, mo, pl, re):
     _RDF = "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}"
     _RDFS = "{http://www.w3.org/2000/01/rdf-schema#}"
     _OWL = "{http://www.w3.org/2002/07/owl#}"
-    _OIO = "{http://www.geneontology.org/formats/oboInOwl#}"
-
-
-    def mp_normalise(text):
-        """Fold a phenotype label to a comparison key (case, punctuation, spacing)."""
-        return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-
 
     mp_labels = {}
     mp_obsolete = set()
     mp_parents = defaultdict(list)
-    mp_label_index = defaultdict(set)
 
     # One streaming pass over 101 MB of RDF/XML, ~1.5s -- no ontology library needed.
     # Only clear owl:Class elements: clearing every element wipes child text before
@@ -492,10 +485,6 @@ def _(ET, Path, defaultdict, deque, mo, pl, re):
             _label = _el.findtext(_RDFS + "label")
             if _label:
                 mp_labels[_cid] = _label
-                mp_label_index[mp_normalise(_label)].add(_cid)
-                for _syn in _el.findall(_OIO + "hasExactSynonym"):
-                    if _syn.text:
-                        mp_label_index[mp_normalise(_syn.text)].add(_cid)
             if _el.findtext(_OWL + "deprecated") == "true":
                 mp_obsolete.add(_cid)
             for _sub in _el.findall(_RDFS + "subClassOf"):
@@ -545,139 +534,65 @@ def _(ET, Path, defaultdict, deque, mo, pl, re):
         f"({mp_rollup.height / mp_rollup['mp_id'].n_unique():.2f} categories per term — "
         f"MP is a DAG, so these overlap)."
     )
-    return (
-        mp_categories,
-        mp_label_index,
-        mp_labels,
-        mp_normalise,
-        mp_obsolete,
-        mp_rollup,
-    )
+    return mp_categories, mp_labels, mp_obsolete, mp_rollup
 
 
 @app.cell
-def _(catalog, mo, mp_label_index, mp_labels, mp_normalise, pl, re):
-    _PAIR = re.compile(r"^\s*(.*?)\s*\[(MP:\d+)\]\s*$")
-    _MAX_JOIN = 4  # longest comma-split label seen in this data is 3 parts
-
-
-    def mp_resolve(label):
-        """The single MP term matching a label or exact synonym, else None."""
-        _hits = mp_label_index.get(mp_normalise(label), set())
-        return next(iter(_hits)) if len(_hits) == 1 else None
-
-
-    def mp_is_fragment(label, mp_id):
-        """True when `label` is only the text before the first comma of the term's label.
-
-        Used to *locate* the first split for the diagnostic below. Not used for repair:
-        it trusts the file's id, which is the half the split breaks.
-        """
-        _full = mp_labels.get(mp_id, "")
-        return bool(_full) and "," in _full and label == _full.split(",")[0].strip() and label != _full
-
-
-    # ponytail: repair for MMRRC's comma-split export. Any label containing a comma is
-    # broken into separate entries, and from the first split onward each label is paired
-    # with the *next* term's id. Repair is id-independent -- rejoin the longest run of
-    # consecutive entries whose comma-joined label resolves to exactly one term, then
-    # resolve by label -- because the ids are the broken half. Two exceptions: before any
-    # split has occurred the file's id is still reliable, so a truncated label whose id
-    # names "<label>, ..." keeps the id and its qualifier (penetrance, mostly); and a
-    # label that resolves to nothing falls back to the id. See github.com/gaurav/mmrrc
-    # issue #1. Delete all of this if MMRRC fixes the export -- mp_repair_stats will show
-    # when it has stopped doing anything.
-    _edges = []
-    _st = dict(
-        strains=0, split_strains=0, joined=0, entries=0,
-        by_label=0, by_id_specific=0, by_id=0, unresolved=0, corrected=0,
-        pre_ok=0, pre_n=0, post_ok=0, post_n=0,
+def _(catalog, mo, mp_labels, pl, re):
+    # Take the MP ids and nothing else. The label half of MPT_IDS is unusable:
+    # MMRRC joins the phenotype names into one comma-separated string, re-splits it on
+    # ", " and truncates to the number of ids -- so any label containing a comma is
+    # torn in two and the tail of the list is dropped. The ids are untouched: complete,
+    # correctly ordered, and every one a valid MP term. Labels come from the ontology.
+    # See https://github.com/gaurav/mmrrc/issues/1.
+    strain_phenotypes = (
+        catalog.filter(pl.col("MPT_IDS").is_not_null())
+        .unique(subset=["STRAIN/STOCK_ID"])
+        .select(
+            pl.col("STRAIN/STOCK_ID").alias("strain_id"),
+            pl.col("MPT_IDS").str.extract_all(r"MP:\d+").alias("mp_id"),
+        )
+        .explode("mp_id", empty_as_null=False)
+        .unique()
     )
 
+    # Diagnostics for the highlights below: how badly the label half is mangled, and
+    # confirmation that the ids are the intact half.
+    _dmg = dict(strains=0, ids=0, truncated_strains=0, lost_slots=0, pos=0, pos_match=0)
     for _row in (
         catalog.filter(pl.col("MPT_IDS").is_not_null())
         .unique(subset=["STRAIN/STOCK_ID"])
-        .select(["STRAIN/STOCK_ID", "MPT_IDS"])
+        .select(["MPT_IDS"])
         .iter_rows(named=True)
     ):
-        _m = [_PAIR.match(_p) for _p in _row["MPT_IDS"].split("|")]
-        _pairs = [(_x.group(1), _x.group(2)) for _x in _m if _x]
-        _st["strains"] += 1
+        _entries = [_e.strip() for _e in _row["MPT_IDS"].split("|")]
+        _ids = re.findall(r"MP:\d+", _row["MPT_IDS"])
+        _texts = [re.sub(r"\s*\[MP:\d+\]\s*$", "", _e) for _e in _entries]
+        _dmg["strains"] += 1
+        _dmg["ids"] += len(_ids)
+        if any(_i not in mp_labels for _i in _ids):
+            continue
+        # Reconstruct what MMRRC's exporter did: join the real labels, re-split on
+        # ", ", keep only as many pieces as there are ids.
+        _expanded = ", ".join(mp_labels[_i] for _i in _ids).split(", ")
+        if len(_expanded) > len(_ids):
+            _dmg["truncated_strains"] += 1
+            _dmg["lost_slots"] += len(_expanded) - len(_ids)
+        for _a, _b in zip(_texts, _expanded):
+            _dmg["pos"] += 1
+            _dmg["pos_match"] += _a.lower() == _b.lower()
 
-        # Diagnostic: how often the file's label matches the id the file gives it,
-        # before vs. after the first comma-split in this strain's list.
-        _split_at = next(
-            (_i for _i, (_l, _p) in enumerate(_pairs) if mp_is_fragment(_l, _p)), None
-        )
-        for _i, (_l, _p) in enumerate(_pairs):
-            _ok = mp_labels.get(_p) == _l
-            if _split_at is None or _i < _split_at:
-                _st["pre_n"] += 1
-                _st["pre_ok"] += _ok
-            else:
-                _st["post_n"] += 1
-                _st["post_ok"] += _ok
-        _st["split_strains"] += _split_at is not None
-
-        _i, _shifted = 0, False
-        while _i < len(_pairs):
-            _take, _label = 1, _pairs[_i][0]
-            for _k in range(min(_MAX_JOIN, len(_pairs) - _i), 1, -1):
-                _cand = ", ".join(_p[0] for _p in _pairs[_i : _i + _k])
-                if mp_resolve(_cand):
-                    _take, _label = _k, _cand
-                    break
-            _given = _pairs[_i][1]
-            _i += _take
-            _st["joined"] += _take > 1
-            _st["entries"] += 1
-
-            _by_label = mp_resolve(_label)
-            _full = mp_labels.get(_given, "")
-            _truncated = (
-                not _shifted
-                and _take == 1
-                and _by_label is not None
-                and _by_label != _given
-                and _full.startswith(_label + ",")
-            )
-
-            if _truncated:
-                # The label lost its qualifier but the id is still aligned here.
-                _final = _given
-                _st["by_id_specific"] += 1
-            elif _by_label is not None:
-                _final = _by_label
-                _st["by_label"] += 1
-                if _take > 1 or _by_label != _given:
-                    _shifted = True
-            elif _given in mp_labels:
-                _final = _given
-                _st["by_id"] += 1
-            else:
-                _st["unresolved"] += 1
-                continue
-
-            _st["corrected"] += _final != _given
-            _edges.append({"strain_id": _row["STRAIN/STOCK_ID"], "mp_id": _final})
-
-    strain_phenotypes = pl.DataFrame(
-        _edges, schema={"strain_id": pl.String, "mp_id": pl.String}
-    ).unique()
-    mp_repair_stats = _st
+    mp_label_damage = _dmg
 
     mo.md(
         f"`strain_phenotypes`: **{strain_phenotypes.height:,} strain→phenotype edges** "
         f"over {strain_phenotypes['strain_id'].n_unique():,} strains and "
-        f"{strain_phenotypes['mp_id'].n_unique():,} distinct MP terms. "
-        f"Rejoined {_st['joined']:,} comma-split labels and re-pointed "
-        f"**{_st['corrected']:,} of {_st['entries']:,}** entries "
-        f"({_st['corrected'] / _st['entries']:.1%}) whose id disagreed with their label; "
-        f"{_st['by_label'] / _st['entries']:.1%} resolved by label, "
-        f"{_st['by_id_specific']:,} kept a more specific id, "
-        f"{_st['unresolved']:,} unresolved."
+        f"{strain_phenotypes['mp_id'].n_unique():,} distinct MP terms, taken from the ids "
+        f"alone. Reconstructing MMRRC's mangled label column from those ids reproduces "
+        f"**{_dmg['pos_match'] / _dmg['pos']:.1%}** of its {_dmg['pos']:,} label slots — "
+        f"the ids are the intact half."
     )
-    return mp_repair_stats, strain_phenotypes
+    return mp_label_damage, strain_phenotypes
 
 
 @app.cell
@@ -893,14 +808,14 @@ def _(
 def _(
     catalog,
     mo,
+    mp_label_damage,
     mp_labels,
-    mp_repair_stats,
     mp_rollup,
     phenotype_index,
     pl,
     strain_phenotypes,
 ):
-    _s = mp_repair_stats
+    _d = mp_label_damage
     _all_strains = catalog["STRAIN/STOCK_ID"].n_unique()
     _ann_ids = strain_phenotypes["strain_id"].unique().to_list()
     _ann = len(_ann_ids)
@@ -919,44 +834,40 @@ def _(
     mo.md(f"""
     ## Things worth knowing about the phenotype data
 
-    **1. One in seven annotations points at the wrong term — this notebook repairs
-    them.** MMRRC's export splits any label containing a comma, so `decreased
-    CD4-positive, alpha-beta T cell number` arrives as two entries. From the first
-    split onward, every remaining label in that strain's list is paired with the
-    *next* term's id. The evidence is the collapse in label/id agreement either side
-    of the split point:
+    **1. The labels in `MPT_IDS` are corrupt; the ids are fine. Use the ids.**
+    MMRRC's exporter joins the phenotype names into one comma-separated string,
+    re-splits that string on `", "`, and zips the pieces against the id list,
+    truncating to its length. Because MP labels legitimately contain commas
+    (`decreased CD4-positive, alpha-beta T cell number`), every such label is torn in
+    two, everything after it slides by one, and the tail of the label list falls off
+    the end.
 
-    | Position in a strain's list | Label matches the id it was given |
-    |---|---|
-    | before the first split | {_s["pre_ok"]:,} of {_s["pre_n"]:,} ({_s["pre_ok"] / max(_s["pre_n"], 1):.1%}) |
-    | **after** the first split | {_s["post_ok"]:,} of {_s["post_n"]:,} (**{_s["post_ok"] / max(_s["post_n"], 1):.1%}**) |
+    Reconstructing the column from the ids alone — join the ontology's labels, split
+    on `", "`, truncate — reproduces **{_d["pos_match"]:,} of {_d["pos"]:,}
+    ({_d["pos_match"] / _d["pos"]:.1%})** of the label slots in the file, which is
+    what identifies the mechanism. The residual is ordinary label drift (point 2).
 
-    It is an off-by-one chain, each label carrying the previous entry's id:
+    {_d["truncated_strains"]:,} of {_d["strains"]:,} annotated strains are affected,
+    losing {_d["lost_slots"]:,} label slots. All {_d["ids"]:,} ids are valid MP terms.
 
-    | Label in the file | Id the file gives it | …which is really | Correct id |
-    |---|---|---|---|
-    | `increased pro-B cell number` | MP:0008547 | abnormal neocortex morphology | **MP:0008186** |
-    | `abnormal neocortex morphology` | MP:0008869 | anovulation | **MP:0008547** |
-    | `anovulation` | MP:0008882 | abnormal enterocyte physiology | **MP:0008869** |
+    `MMRRC:011644-UNC` is the shape of it — four ids, but only enough label text for
+    the first four fragments of three of them:
 
-    {_s["split_strains"]:,} of {_s["strains"]:,} annotated strains are affected.
-    Rejoining the split labels and resolving each against the ontology re-pointed
-    **{_s["corrected"]:,} of {_s["entries"]:,} entries
-    ({_s["corrected"] / _s["entries"]:.1%})**. {_s["by_label"] / _s["entries"]:.1%}
-    resolve by label or exact synonym; {_s["by_id_specific"]:,} keep the file's id
-    because it is *more* specific than a truncated label (`prenatal lethality` where
-    the file means `prenatal lethality, complete penetrance` — safe only before the
-    first split, where the ids are still aligned); {_s["by_id"]:,} fall back to the
-    file's id because the label no longer resolves at all (terms MP has retired), and
-    {_s["unresolved"]:,} are unresolved.
+    | Entry in the file | The id is right | The label beside it is not |
+    |---|---|---|
+    | `abnormal trophoblast giant cell morphology [MP:0005033]` | abnormal trophoblast giant cell morphology | ✅ |
+    | `embryonic lethality between implantation and somite formation [MP:0011096]` | …, **complete penetrance** | truncated at the comma |
+    | `complete penetrance [MP:0011100]` | preweaning lethality, complete penetrance | the other half of the line above |
+    | `preweaning lethality [MP:0012113]` | **decreased inner cell mass proliferation** | label ran out; text is a leftover |
 
-    **2. MMRRC's labels are a stale snapshot.** Every id in the column is a real MP
-    term, but the labels have drifted — `aggression towards males` is now `aggression
-    towards male mice`, `reduced long term potentiation` is now `reduced long-term
-    potentiation`, `altered response to myocardial infarction` is now `abnormal
-    response to cardiac infarction`. Resolution therefore matches `rdfs:label` *and*
-    `oboInOwl:hasExactSynonym`, and every table above shows the ontology's label
-    rather than the catalog's.
+    The strain really does have `MP:0012113 decreased inner cell mass proliferation` —
+    its name never appears in the file because the label expansion was cut short.
+
+    **2. The labels are also a stale snapshot.** Independent of the mangling, MMRRC's
+    text lags the ontology — `hypoactivity` is now `decreased locomotor activity`,
+    `retinal degeneration` is now `retina degeneration`, `thyroid inflammation` is now
+    `thyroid gland inflammation`, `aorta dilation` is now `dilated aorta`. Another
+    reason to take ids and render labels from `mp.owl`, as every table above does.
 
     **3. Phenotype coverage is thin and skewed.** Only **{_ann:,} of
     {_all_strains:,} strains ({_ann / _all_strains:.1%})** carry any phenotype, and

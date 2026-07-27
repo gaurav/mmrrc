@@ -135,31 +135,38 @@ not independent alleles.
 effect), 46,860 entries, 5,463 distinct MP terms once repaired. Annotated strains
 skew to targeted mutations (2,666 `TM` vs 374 `CI`).
 
-**The MP ids in this column are wrong for ~14% of entries — do not join on them.**
-MMRRC's export splits any label containing a comma, and from the first split
-onward each label is paired with the *next* term's id. Filed upstream as
-[issue #1](https://github.com/gaurav/mmrrc/issues/1). Label/id agreement before
-the first split is 95.8%; after it, 15.1%.
+**The labels in this column are damaged; the MP ids are intact. Read the ids and
+throw the labels away.** Filed upstream as
+[issue #1](https://github.com/gaurav/mmrrc/issues/1).
 
-Recovery (implemented in the notebook's `strain_phenotypes` cell):
+MMRRC's exporter joins the phenotype names into one comma-separated string,
+re-splits that string on `", "`, and zips the pieces against the id list,
+truncating to its length:
 
-1. Build a lookup of normalised `rdfs:label` **and** `oboInOwl:hasExactSynonym`
-   → MP id. Normalise with `re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()` so
-   `alpha-beta` and `alpha beta` agree.
-2. Rejoin greedily: at each position try comma-joining the next 4, 3, then 2
-   entries' labels; if a join resolves to exactly one term, take it. Longest match
-   first — a few labels split into three parts.
-3. Resolve by label, with two exceptions: before any split in that list the id is
-   still aligned, so a truncated label whose id names `<label>, …` keeps the id
-   (this preserves `, complete penetrance`); and a label that resolves to nothing
-   falls back to the id.
+```python
+labels = ", ".join(names).split(", ")[:len(ids)]   # what MMRRC appears to do
+```
 
-Result: 97.9% resolve by label, 1.3% keep a more specific id, 0.8% fall back,
-**0 unresolved**, 6,530 entries re-pointed.
+MP names legitimately contain commas (`decreased CD4-positive, alpha-beta T cell
+number`), so each one is torn in two, everything after slides by one, and the
+names at the end fall off. **1,450 of 4,604 annotated strains are affected and
+2,148 phenotype names are dropped from the file.** Reconstructing the column from
+the ids by exactly that procedure reproduces 43,900 of 48,069 label slots (91.3%)
+character for character — that is what identifies the mechanism.
 
-MMRRC's labels are also a stale snapshot — matching synonyms as well as labels
-absorbs most of the drift (`aggression towards males` → `aggression towards male
-mice`). Always display the ontology's label, never the catalog's.
+All 48,069 ids are valid MP terms, so recovery is a one-liner:
+
+```python
+pl.col("MPT_IDS").str.extract_all(r"MP:\d+")   # then explode + join to mp.owl
+```
+
+**Do not try to recover terms by matching label text.** That was tried first and
+is wrong: it discards correct ids, invents terms from torn fragments, cannot
+recover names that were never published, and lost ~1,250 real annotations.
+
+The stored labels are a stale snapshot too (`hypoactivity` → `decreased locomotor
+activity`, `retinal degeneration` → `retina degeneration`), which is a second
+reason to render every label from `mp.owl`.
 
 Watch for `MP:0002169` "no abnormal phenotype detected" — 442 strains, the second
 most common entry. It is a negative result, not a phenotype. The ontology files
