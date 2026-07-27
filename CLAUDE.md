@@ -11,29 +11,87 @@ https://www.mmrrc.org/methods/data_download.php. 588,980 rows × 18 columns.
 Header note: `RESEARCH_AREAS ` has a trailing space in the file. Strip it on
 load with `pl.read_csv(path).rename(str.strip)`.
 
-### Grain: one row per (strain, allele, gene) — *not* per strain
+### Grain: long format, two disjoint kinds of row — *not* one row per strain
 
 `STRAIN/STOCK_ID` is **not** unique: 69,388 distinct strains over 588,980 rows
 (~8.5 rows/strain, no nulls). Strain-level fields are repeated verbatim on every
-row of a strain; only the gene columns vary.
+row of a strain.
 
-For example `MMRRC:042022-MU` has 206 rows in which `STRAIN/STOCK_DESIGNATION`,
-`OTHER_NAMES`, `MGI_ALLELE_ACCESSION_ID`, `ALLELE_SYMBOL`, `MPT_IDS`,
-`PUBMED_IDS` and `SDS_URL` are all constant, while `GENE_SYMBOL`, `GENE_NAME`
-and `MGI_GENE_ACCESSION_ID` take 206 distinct values across 20 chromosomes — a
-lesion spanning many genes.
+Every row is one of two disjoint kinds — **zero rows carry both**:
 
-Alleles per strain: 37,418 strains have 1, 19,699 have 2, 12,150 have 3, and
-121 have 4–7. 28,329 strains are a single row.
+| Kind | Rows | `GENE_SYMBOL` / `MGI_GENE_ACCESSION_ID` | `ALLELE_SYMBOL` / `MGI_ALLELE_ACCESSION_ID` |
+|---|---:|---|---|
+| gene row | 534,057 | set | null |
+| allele row | 44,591 | null | set |
+| neither | 10,332 | null | null |
+
+So **a gene is never joined to an allele within a row** — they connect only
+through `STRAIN/STOCK_ID`. `MMRRC:000001-UNC` shows the shape exactly: three
+gene rows (`Fgg`, `Fgb`, `Fga`) plus one allele row (`Tg(Fga,Fgb,Fgg)1Unc`).
+
+Per strain: mean 7.7 genes (max 206 — `MMRRC:042022-MU`, a lesion spanning 206
+genes across 20 chromosomes), and 9,178 strains have no gene row at all.
+Alleles per strain: 37,225 have 0, 19,877 have 1, 12,162 have 2, 113 have 3,
+10 have 4, one has 6.
 
 **Consequence: any per-strain count taken off the raw frame is inflated.** Use
 `catalog.unique(subset=["STRAIN/STOCK_ID"])` for strain-level questions, and
-treat the raw frame as the strain↔gene edge list.
+treat the raw frame as the strain↔gene edge list. Beware `n_unique()` on
+nullable columns — it counts null as a value, which silently turns "no allele"
+into "1 allele". Use `.drop_nulls().n_unique()`.
 
 `(STRAIN/STOCK_ID, ALLELE_SYMBOL, GENE_SYMBOL)` is *nearly* a key — 97 violating
-groups covering 229 rows. All of them have both allele and gene null; within
-those groups only `MUTATION_TYPE` and `CHROMOSOME` ever differ, and 82 rows are
-byte-identical duplicates.
+groups covering 229 rows. All of them are "neither" rows; within those groups
+only `MUTATION_TYPE` and `CHROMOSOME` ever differ, and 82 rows are byte-identical
+duplicates.
+
+### The ENU trap — read before ranking anything
+
+**8,229 chemically-induced strains (`MUTATION_TYPE == "CI"`) carry a mean of 58
+genes each and account for 478,364 of the 588,980 rows (81%).** Every other
+mutation type averages one to three genes per strain.
+
+An ENU strain's gene list is a set of *candidate variants found by sequencing*,
+not deliberate manipulations. Longer genes collect more random hits, so ranking
+genes by strain count with `CI` included returns `Ttn`, `Obscn`, `Neb`, `Rsf1`,
+`Dst` — a gene-length ranking, not a research-interest one. Excluding `CI` gives
+`Hprt1`, `EGFP`, `cre`, `lacZ`, `Ctbp2`. **8,167 of 24,593 genes (33%) appear
+only in CI strains** and have never been deliberately targeted.
+
+Default to excluding `CI` for any "which genes matter" question, and say so.
+
+### Gotchas in the gene and chromosome columns
+
+- `CHROMOSOME` is free text: 50 distinct values for what should be 22, including
+  `unknown`, `UN`, `unk`, `N/A`, `Chr 1`, `Chr11:4938754-4948064 bp`, `8q21.13`
+  (a *human* cytoband) and `919`. Normalise with uppercase → strip a `CHR`
+  prefix → keep `1`–`19`, `X`, `Y`, `MT`, bucket the rest as unmapped.
+- Rows on "chromosome" 20, 21 and 22 are **human transgenes** — mice have 19
+  autosomes plus X/Y. `SOD1` and `APP` on chr21 are human coordinates.
+- 723 gene symbols are ALL-CAPS (592 with no MGI id): non-mouse transgenes.
+- `EGFP`, `cre`, `lacZ`, `tTA` are cassettes, not loci — no MGI id, no
+  chromosome. They rank near the top of any non-CI gene ranking.
+- 23 gene symbols map to more than one MGI id; 19 genes appear on more than one
+  chromosome value.
+
+### Code legends
+
+Verified against https://www.mmrrc.org/methods/data_download.php.
+
+`MUTATION_TYPE`: SM spontaneous · TM targeted · TG transgenic · GT gene trap ·
+CI chemically induced · RAD radiation induced · CH chromosomal aberration ·
+RB Robertsonian translocation · TL reciprocal translocation · TP transposition ·
+INV inversion · INS insertion · DEL deletion · DP duplication · OTH other.
+
+`STRAIN_TYPE`: IS inbred · UN unclassified · MSR mutant strain · MSK mutant
+stock · COI coisogenic · SEG segregating inbred · NON noninbred · WDS
+wild-derived inbred · CSS consomic/chromosome substitution · RI recombinant
+inbred · RC recombinant congenic. (`CON`, 916 strains, appears in the data but
+not in the published legend — presumably congenic; confirm before relying on it.)
+
+`STATE` (comma-separated, multi-valued): LM live mouse · CA cryo-archived ·
+EM cryopreserved embryos · SP cryopreserved/freeze-dried sperm · ES ES cell
+lines · CU currently unavailable.
 
 ### Column sparsity (nulls out of 588,980)
 
