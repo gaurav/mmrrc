@@ -27,7 +27,7 @@ def _():
 
 @app.cell
 def _(Path, mo, pl):
-    CATALOG_CSV = Path("../data/mmrrc_catalog_data.csv.gz")
+    CATALOG_CSV = Path("../downloaded/mmrrc_catalog_data.csv.gz")
 
     catalog = pl.read_csv(CATALOG_CSV).rename(str.strip)
     mo.md(f"**{CATALOG_CSV.name}**: {catalog.height:,} rows x {catalog.width} columns")
@@ -453,7 +453,7 @@ def _(mo):
 
     > `decreased bone mineral density [MP:0000063]| abnormal vertebrae morphology [MP:0000137]| …`
 
-    This section cross-links them against `data/mp.owl`, the Mammalian Phenotype
+    This section cross-links them against `downloaded/mp.owl.gz`, the Mammalian Phenotype
     Ontology, to group phenotypes under their parent categories and see which areas
     of mouse biology the collection actually covers.
 
@@ -469,7 +469,7 @@ def _(mo):
 
 @app.cell
 def _(ET, Path, defaultdict, deque, gzip, mo, pl):
-    MP_OWL = Path("../data/mp.owl.gz")
+    MP_OWL = Path("../downloaded/mp.owl.gz")
     MP_ROOT = "MP:0000001"
 
     _OBO = "http://purl.obolibrary.org/obo/"

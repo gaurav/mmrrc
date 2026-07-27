@@ -5,8 +5,10 @@ Research Centers, https://www.mmrrc.org/). We'll flesh out these notes as we go.
 
 ## The MMRRC catalog dataset
 
-`data/mmrrc_catalog_data.csv` (gitignored, ~147 MB) was downloaded from
-https://www.mmrrc.org/methods/data_download.php. 588,980 rows × 18 columns.
+`downloaded/mmrrc_catalog_data.csv.gz` — 588,980 rows × 18 columns. Provenance,
+download dates and checksums for every source file live in
+[`downloaded/README.md`](downloaded/README.md); keep it current, since both
+upstream datasets evolve.
 
 Header note: `RESEARCH_AREAS ` has a trailing space in the file. Strip it on
 load with `pl.read_csv(path).rename(str.strip)`.
@@ -172,9 +174,9 @@ Watch for `MP:0002169` "no abnormal phenotype detected" — 442 strains, the sec
 most common entry. It is a negative result, not a phenotype. The ontology files
 it under *normal phenotype*, which is the cheapest way to spot it.
 
-### Parsing `data/mp.owl`
+### Parsing `downloaded/mp.owl.gz`
 
-101 MB RDF/XML (gitignored), 15,288 MP terms (457 obsolete) plus merged
+101 MB of RDF/XML (5.5 MB gzipped), 15,288 MP terms (457 obsolete) plus merged
 PATO/UBERON/GO/CHEBI/CL imports — 126,454 `owl:Class` elements in total.
 
 **No ontology library needed.** A single `xml.etree.ElementTree.iterparse` pass
