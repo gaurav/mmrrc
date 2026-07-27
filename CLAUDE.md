@@ -60,6 +60,47 @@ only in CI strains** and have never been deliberately targeted.
 
 Default to excluding `CI` for any "which genes matter" question, and say so.
 
+### Reading the nomenclature
+
+Allele and strain symbols are structured MGI/ILAR nomenclature, not free text.
+28,406 distinct allele symbols break down as:
+
+| Shape | Count | Meaning | Example |
+|---|---:|---|---|
+| `Gene<tmN…>` | 20,857 | targeted mutation | `Diaph3<tm1a(KOMP)Mbp>` |
+| `Gene<emN…>` | 4,647 | endonuclease-mediated (CRISPR) | `Prim1<em1(IMPC)J>` |
+| `Tg(…)` | 1,867 | transgene, free-standing | `Tg(Rarb-EGFP)IT82Gsat` |
+| `Gene<other>` | 590 | named/spontaneous allele | `Nr2e1<frc>` |
+| `Gene<GtN…>` | 348 | gene trap | `Sigmar1<Gt(OST422756)Lex>` |
+| bare | 75 | unstructured | `aspb`, `Et(icre)21733Rdav` |
+| `Del(…)` | 22 | deletion spanning a region | `Del(7Cyp2s1-Cyp2f2)2Ding` |
+
+**Angle brackets are this file's rendering of a superscript.** `Diaph3<tm1a(KOMP)Mbp>`
+is printed elsewhere as Diaph3^tm1a(KOMP)Mbp. Parse on `<`/`>`, and expect the
+gene symbol before the bracket to duplicate `GENE_SYMBOL` — except that allele
+rows have `GENE_SYMBOL` null (see grain above), so the symbol prefix is often the
+*only* place the gene name appears on that row.
+
+Worked example — `MMRRC:000001-UNC`, designation
+`C57BL/6-Tg(Fga,Fgb,Fgg)1Unc/Mmnc`:
+
+| Token | Meaning |
+|---|---|
+| `C57BL/6` | background inbred strain |
+| `-` | joins background to the allele it carries |
+| `Tg` | allele class: transgene, inserted at a random site |
+| `(Fga,Fgb,Fgg)` | **contents of the insert** — here three fibrinogen genes |
+| `1` | serial number for that lab (can be alphanumeric, e.g. `IT82`) |
+| `Unc` | ILAR lab registration code (University of North Carolina) |
+| `/Mmnc` | holding facility — MMRRC at UNC |
+
+The parenthesised part of a `Tg(…)` is the **payload**, not a locus. Parenthesised
+`(KOMP)`, `(IMPC)`, `(EUCOMM)` in a `tm` symbol are the originating project, not a
+gene. On KOMP/EUCOMM alleles the `a`/`b`/`c`/`d` suffix on `tm1` marks the
+conditional-ready cassette series (`tm1a` knockout-first → `tm1b`/`tm1c`/`tm1d`
+after Cre and/or Flp), so `tm1a` and `tm1b` on the same gene are the same project,
+not independent alleles.
+
 ### Gotchas in the gene and chromosome columns
 
 - `CHROMOSOME` is free text: 50 distinct values for what should be 22, including
@@ -68,6 +109,19 @@ Default to excluding `CI` for any "which genes matter" question, and say so.
   prefix → keep `1`–`19`, `X`, `Y`, `MT`, bucket the rest as unmapped.
 - Rows on "chromosome" 20, 21 and 22 are **human transgenes** — mice have 19
   autosomes plus X/Y. `SOD1` and `APP` on chr21 are human coordinates.
+- **For transgenics, `CHROMOSOME` on a gene row is the gene's normal address,
+  not the insertion site.** A `Tg` insert lands at random, so the gene rows
+  report where the *endogenous* copy lives while the allele row admits the truth:
+  of 2,110 `TG` allele rows, 1,735 say `unknown` and 82 are null — yet 2,192 of
+  the 4,001 `TG` gene rows (2,048 strains) assert a numeric chromosome.
+  `MMRRC:000001-UNC` is the pattern: three gene rows on chromosome 3 (the mouse
+  fibrinogen cluster) plus one allele row, `Tg(Fga,Fgb,Fgg)1Unc`, on `unknown`.
+  Any "which chromosome is most manipulated" count inherits this — it measures
+  where the copied genes normally sit, not where anything was engineered.
+- A transgene's genes are not necessarily from another species. `Tg(Fga,Fgb,Fgg)1Unc`
+  is a ~100 kb P1 clone of the mouse's *own* fibrinogen genes, used to build a
+  hyperfibrinogenemia model (PMID 11521996) — hence mouse MGI ids on those rows.
+  Check the case of the symbol before assuming a humanised model.
 - 723 gene symbols are ALL-CAPS (592 with no MGI id): non-mouse transgenes.
 - `EGFP`, `cre`, `lacZ`, `tTA` are cassettes, not loci — no MGI id, no
   chromosome. They rank near the top of any non-CI gene ranking.
