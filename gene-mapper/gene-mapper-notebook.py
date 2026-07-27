@@ -8,10 +8,13 @@ app = marimo.App(width="medium")
 def _():
     import marimo as mo
     import polars as pl
+    import re
+    import xml.etree.ElementTree as ET
+    from collections import defaultdict, deque
     from pathlib import Path
     from urllib.parse import quote_plus
 
-    return Path, mo, pl, quote_plus
+    return ET, Path, defaultdict, deque, mo, pl, quote_plus, re
 
 
 @app.cell
@@ -428,6 +431,556 @@ def _(catalog, catalog_genes, mo, pl):
     carries the most distinct genes ({_most_genes["genes"]:,}) while chromosome
     {_most_strains["chrom"]} carries the most strains ({_most_strains["strains"]:,}) —
     gene density and research attention are not the same thing.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    # Phenotype exploration
+
+    `MPT_IDS` holds Mammalian Phenotype annotations as pipe-separated
+    `label [MP:id]` pairs:
+
+    > `decreased bone mineral density [MP:0000063]| abnormal vertebrae morphology [MP:0000137]| …`
+
+    This section cross-links them against `data/mp.owl`, the Mammalian Phenotype
+    Ontology, to group phenotypes under their parent categories and see which areas
+    of mouse biology the collection actually covers.
+
+    **The MP ids in this column cannot be used as-is.** MMRRC's export splits labels
+    that contain a comma, and from the first split onwards every remaining label in
+    that strain's list is paired with the *next* term's id. Roughly one in seven
+    annotations is attached to the wrong term. The cells below re-derive each id from
+    its label instead; the highlights at the end of the section show the evidence.
+    """)
+    return
+
+
+@app.cell
+def _(ET, Path, defaultdict, deque, mo, pl, re):
+    MP_OWL = Path("../data/mp.owl")
+    MP_ROOT = "MP:0000001"
+
+    _OBO = "http://purl.obolibrary.org/obo/"
+    _RDF = "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}"
+    _RDFS = "{http://www.w3.org/2000/01/rdf-schema#}"
+    _OWL = "{http://www.w3.org/2002/07/owl#}"
+    _OIO = "{http://www.geneontology.org/formats/oboInOwl#}"
+
+
+    def mp_normalise(text):
+        """Fold a phenotype label to a comparison key (case, punctuation, spacing)."""
+        return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+    mp_labels = {}
+    mp_obsolete = set()
+    mp_parents = defaultdict(list)
+    mp_label_index = defaultdict(set)
+
+    # One streaming pass over 101 MB of RDF/XML, ~1.5s -- no ontology library needed.
+    # Only clear owl:Class elements: clearing every element wipes child text before
+    # the parent's end event can read it.
+    for _ev, _el in ET.iterparse(MP_OWL, events=("end",)):
+        if _el.tag != _OWL + "Class":
+            continue
+        _about = _el.get(_RDF + "about", "")
+        if _about.startswith(_OBO + "MP_"):
+            _cid = "MP:" + _about.rsplit("MP_", 1)[1]
+            _label = _el.findtext(_RDFS + "label")
+            if _label:
+                mp_labels[_cid] = _label
+                mp_label_index[mp_normalise(_label)].add(_cid)
+                for _syn in _el.findall(_OIO + "hasExactSynonym"):
+                    if _syn.text:
+                        mp_label_index[mp_normalise(_syn.text)].add(_cid)
+            if _el.findtext(_OWL + "deprecated") == "true":
+                mp_obsolete.add(_cid)
+            for _sub in _el.findall(_RDFS + "subClassOf"):
+                # Named parents only; anonymous owl:Restriction children carry no
+                # rdf:resource and are skipped.
+                _r = _sub.get(_RDF + "resource")
+                if _r and _r.startswith(_OBO + "MP_"):
+                    mp_parents[_cid].append("MP:" + _r.rsplit("MP_", 1)[1])
+        _el.clear()
+
+    # The 28 children of "mammalian phenotype" -- the body-system grouping.
+    mp_categories = {
+        _c: mp_labels[_c]
+        for _c in sorted(
+            (_k for _k, _ps in mp_parents.items() if MP_ROOT in _ps),
+            key=lambda _k: mp_labels[_k],
+        )
+    }
+
+
+    def mp_ancestors(mp_id):
+        """Every ancestor of a term. MP is a DAG, so a term can have several parents."""
+        _seen, _out, _q = {mp_id}, set(), deque([mp_id])
+        while _q:
+            for _p in mp_parents.get(_q.popleft(), ()):
+                if _p not in _seen:
+                    _seen.add(_p)
+                    _out.add(_p)
+                    _q.append(_p)
+        return _out
+
+
+    _cat_ids = set(mp_categories)
+    mp_rollup = pl.DataFrame(
+        [
+            {"mp_id": _c, "category_id": _k}
+            for _c in mp_labels
+            for _k in ({_c} | mp_ancestors(_c)) & _cat_ids
+        ],
+        schema={"mp_id": pl.String, "category_id": pl.String},
+    )
+
+    mo.md(
+        f"`mp.owl`: **{len(mp_labels):,} MP terms** ({len(mp_obsolete)} obsolete), "
+        f"**{len(mp_categories)} top-level categories**, "
+        f"{mp_rollup.height:,} term→category edges "
+        f"({mp_rollup.height / mp_rollup['mp_id'].n_unique():.2f} categories per term — "
+        f"MP is a DAG, so these overlap)."
+    )
+    return (
+        mp_categories,
+        mp_label_index,
+        mp_labels,
+        mp_normalise,
+        mp_obsolete,
+        mp_rollup,
+    )
+
+
+@app.cell
+def _(catalog, mo, mp_label_index, mp_labels, mp_normalise, pl, re):
+    _PAIR = re.compile(r"^\s*(.*?)\s*\[(MP:\d+)\]\s*$")
+    _MAX_JOIN = 4  # longest comma-split label seen in this data is 3 parts
+
+
+    def mp_resolve(label):
+        """The single MP term matching a label or exact synonym, else None."""
+        _hits = mp_label_index.get(mp_normalise(label), set())
+        return next(iter(_hits)) if len(_hits) == 1 else None
+
+
+    def mp_is_fragment(label, mp_id):
+        """True when `label` is only the text before the first comma of the term's label.
+
+        Used to *locate* the first split for the diagnostic below. Not used for repair:
+        it trusts the file's id, which is the half the split breaks.
+        """
+        _full = mp_labels.get(mp_id, "")
+        return bool(_full) and "," in _full and label == _full.split(",")[0].strip() and label != _full
+
+
+    # ponytail: repair for MMRRC's comma-split export. Any label containing a comma is
+    # broken into separate entries, and from the first split onward each label is paired
+    # with the *next* term's id. Repair is id-independent -- rejoin the longest run of
+    # consecutive entries whose comma-joined label resolves to exactly one term, then
+    # resolve by label -- because the ids are the broken half. Two exceptions: before any
+    # split has occurred the file's id is still reliable, so a truncated label whose id
+    # names "<label>, ..." keeps the id and its qualifier (penetrance, mostly); and a
+    # label that resolves to nothing falls back to the id. See github.com/gaurav/mmrrc
+    # issue #1. Delete all of this if MMRRC fixes the export -- mp_repair_stats will show
+    # when it has stopped doing anything.
+    _edges = []
+    _st = dict(
+        strains=0, split_strains=0, joined=0, entries=0,
+        by_label=0, by_id_specific=0, by_id=0, unresolved=0, corrected=0,
+        pre_ok=0, pre_n=0, post_ok=0, post_n=0,
+    )
+
+    for _row in (
+        catalog.filter(pl.col("MPT_IDS").is_not_null())
+        .unique(subset=["STRAIN/STOCK_ID"])
+        .select(["STRAIN/STOCK_ID", "MPT_IDS"])
+        .iter_rows(named=True)
+    ):
+        _m = [_PAIR.match(_p) for _p in _row["MPT_IDS"].split("|")]
+        _pairs = [(_x.group(1), _x.group(2)) for _x in _m if _x]
+        _st["strains"] += 1
+
+        # Diagnostic: how often the file's label matches the id the file gives it,
+        # before vs. after the first comma-split in this strain's list.
+        _split_at = next(
+            (_i for _i, (_l, _p) in enumerate(_pairs) if mp_is_fragment(_l, _p)), None
+        )
+        for _i, (_l, _p) in enumerate(_pairs):
+            _ok = mp_labels.get(_p) == _l
+            if _split_at is None or _i < _split_at:
+                _st["pre_n"] += 1
+                _st["pre_ok"] += _ok
+            else:
+                _st["post_n"] += 1
+                _st["post_ok"] += _ok
+        _st["split_strains"] += _split_at is not None
+
+        _i, _shifted = 0, False
+        while _i < len(_pairs):
+            _take, _label = 1, _pairs[_i][0]
+            for _k in range(min(_MAX_JOIN, len(_pairs) - _i), 1, -1):
+                _cand = ", ".join(_p[0] for _p in _pairs[_i : _i + _k])
+                if mp_resolve(_cand):
+                    _take, _label = _k, _cand
+                    break
+            _given = _pairs[_i][1]
+            _i += _take
+            _st["joined"] += _take > 1
+            _st["entries"] += 1
+
+            _by_label = mp_resolve(_label)
+            _full = mp_labels.get(_given, "")
+            _truncated = (
+                not _shifted
+                and _take == 1
+                and _by_label is not None
+                and _by_label != _given
+                and _full.startswith(_label + ",")
+            )
+
+            if _truncated:
+                # The label lost its qualifier but the id is still aligned here.
+                _final = _given
+                _st["by_id_specific"] += 1
+            elif _by_label is not None:
+                _final = _by_label
+                _st["by_label"] += 1
+                if _take > 1 or _by_label != _given:
+                    _shifted = True
+            elif _given in mp_labels:
+                _final = _given
+                _st["by_id"] += 1
+            else:
+                _st["unresolved"] += 1
+                continue
+
+            _st["corrected"] += _final != _given
+            _edges.append({"strain_id": _row["STRAIN/STOCK_ID"], "mp_id": _final})
+
+    strain_phenotypes = pl.DataFrame(
+        _edges, schema={"strain_id": pl.String, "mp_id": pl.String}
+    ).unique()
+    mp_repair_stats = _st
+
+    mo.md(
+        f"`strain_phenotypes`: **{strain_phenotypes.height:,} strain→phenotype edges** "
+        f"over {strain_phenotypes['strain_id'].n_unique():,} strains and "
+        f"{strain_phenotypes['mp_id'].n_unique():,} distinct MP terms. "
+        f"Rejoined {_st['joined']:,} comma-split labels and re-pointed "
+        f"**{_st['corrected']:,} of {_st['entries']:,}** entries "
+        f"({_st['corrected'] / _st['entries']:.1%}) whose id disagreed with their label; "
+        f"{_st['by_label'] / _st['entries']:.1%} resolved by label, "
+        f"{_st['by_id_specific']:,} kept a more specific id, "
+        f"{_st['unresolved']:,} unresolved."
+    )
+    return mp_repair_stats, strain_phenotypes
+
+
+@app.cell
+def _(
+    catalog,
+    catalog_genes,
+    mo,
+    mp_categories,
+    mp_labels,
+    mp_obsolete,
+    mp_rollup,
+    pl,
+    strain_phenotypes,
+):
+    def mp_url(mp_id):
+        """Link to the MGI Mammalian Phenotype browser for a term."""
+        return f"https://www.informatics.jax.org/vocab/mp_ontology/{mp_id}"
+
+
+    _cat_names = pl.DataFrame(
+        {"category_id": list(mp_categories), "category": list(mp_categories.values())}
+    )
+
+    _term_cats = (
+        mp_rollup.join(_cat_names, on="category_id", how="inner")
+        .group_by("mp_id")
+        .agg(pl.col("category").unique().sort().str.join(", ").alias("categories"))
+    )
+
+    # Genes reach a phenotype through the strain, exactly as alleles do (see the
+    # grain notes) -- catalog_genes unfiltered, so this does not inherit the gene
+    # section's mutation-type filter.
+    _strain_genes = (
+        catalog_genes.select(["STRAIN/STOCK_ID", "GENE_SYMBOL"])
+        .unique()
+        .rename({"STRAIN/STOCK_ID": "strain_id"})
+    )
+
+    phenotype_index = (
+        strain_phenotypes.group_by("mp_id")
+        .agg(pl.col("strain_id").n_unique().alias("strains"))
+        .join(
+            strain_phenotypes.join(_strain_genes, on="strain_id", how="inner")
+            .group_by("mp_id")
+            .agg(pl.col("GENE_SYMBOL").n_unique().alias("genes")),
+            on="mp_id",
+            how="left",
+        )
+        .join(_term_cats, on="mp_id", how="left")
+        .with_columns(
+            pl.col("mp_id").replace_strict(mp_labels, default=None).alias("label"),
+            pl.col("mp_id").is_in(list(mp_obsolete)).alias("obsolete"),
+            pl.col("genes").fill_null(0),
+        )
+        .select(["label", "mp_id", "strains", "genes", "categories", "obsolete"])
+        .sort("strains", descending=True)
+    )
+
+    mo.md(
+        f"`phenotype_index`: **{phenotype_index.height:,} distinct phenotypes** used by "
+        f"{strain_phenotypes['strain_id'].n_unique():,} of "
+        f"{catalog['STRAIN/STOCK_ID'].n_unique():,} strains "
+        f"({strain_phenotypes['strain_id'].n_unique() / catalog['STRAIN/STOCK_ID'].n_unique():.1%})."
+    )
+    return mp_url, phenotype_index
+
+
+@app.cell
+def _(mo, mp_categories, mp_rollup, pl, strain_phenotypes):
+    _cat_names2 = pl.DataFrame(
+        {"category_id": list(mp_categories), "category": list(mp_categories.values())}
+    )
+
+    category_summary = (
+        strain_phenotypes.join(mp_rollup, on="mp_id", how="inner")
+        .group_by("category_id")
+        .agg(
+            pl.col("mp_id").n_unique().alias("phenotypes"),
+            pl.col("strain_id").n_unique().alias("strains"),
+        )
+        .join(_cat_names2, on="category_id", how="inner")
+        .select(["category", "strains", "phenotypes", "category_id"])
+        .sort("strains", descending=True)
+    )
+
+    category_table = mo.ui.table(
+        category_summary,
+        selection="multi",
+        page_size=30,
+        label=(
+            "**MP category** — select to filter. A term can sit under several "
+            "categories, so these columns overlap and do not sum to the total."
+        ),
+    )
+    return (category_table,)
+
+
+@app.cell
+def _(category_table, mo, mp_rollup, mp_url, phenotype_index, pl):
+    _csel = category_table.value
+    _cats = _csel["category_id"].to_list() if len(_csel) else None
+
+    if _cats is None:
+        _shown = phenotype_index
+    else:
+        _ids = mp_rollup.filter(pl.col("category_id").is_in(_cats))["mp_id"].unique().to_list()
+        _shown = phenotype_index.filter(pl.col("mp_id").is_in(_ids))
+
+    phenotype_table = mo.ui.table(
+        _shown,
+        selection="single",
+        page_size=15,
+        label=(
+            f"**Phenotypes** — {_shown.height:,} shown"
+            + ("" if _cats is None else ", filtered by category")
+        ),
+        format_mapping={
+            "mp_id": lambda v: mo.md(f"[{v}]({mp_url(v)})" if v else "—"),
+        },
+    )
+
+    mo.hstack([category_table, phenotype_table], widths=[1, 2], align="start")
+    return (phenotype_table,)
+
+
+@app.cell
+def _(
+    catalog,
+    catalog_genes,
+    mgi_url,
+    mo,
+    mp_url,
+    ncbi_url,
+    phenotype_table,
+    pl,
+    strain_phenotypes,
+):
+    _psel = phenotype_table.value
+
+    if not len(_psel):
+        _output = mo.md("_Select a phenotype above to see its genes and strains._")
+    else:
+        _mp = _psel["mp_id"][0]
+        _strain_ids = strain_phenotypes.filter(pl.col("mp_id") == _mp)["strain_id"].to_list()
+
+        _genes = (
+            catalog_genes.filter(pl.col("STRAIN/STOCK_ID").is_in(_strain_ids))
+            .group_by("GENE_SYMBOL")
+            .agg(
+                pl.col("STRAIN/STOCK_ID").n_unique().alias("strains"),
+                pl.col("MGI_GENE_ACCESSION_ID").drop_nulls().first().alias("mgi_id"),
+                pl.col("chrom").first().alias("chrom"),
+            )
+            .rename({"GENE_SYMBOL": "gene_symbol"})
+            .sort("strains", descending=True)
+        )
+
+        _strains = (
+            catalog.filter(pl.col("STRAIN/STOCK_ID").is_in(_strain_ids))
+            .unique(subset=["STRAIN/STOCK_ID"])
+            .with_columns(
+                pl.col("OTHER_NAMES").str.extract(r"(RRID:MMRRC_[\w.-]+)").alias("rrid")
+            )
+            .select([
+                "STRAIN/STOCK_ID", "STRAIN/STOCK_DESIGNATION",
+                "MUTATION_TYPE", "STRAIN_TYPE", "STATE", "rrid", "SDS_URL",
+            ])
+            .rename({
+                "STRAIN/STOCK_ID": "strain_id",
+                "STRAIN/STOCK_DESIGNATION": "designation",
+                "MUTATION_TYPE": "mut",
+            })
+            .sort("strain_id")
+        )
+
+        _output = mo.vstack([
+            mo.md(
+                f"### {_psel['label'][0]}\n\n"
+                f"[{_mp}]({mp_url(_mp)}) &nbsp;·&nbsp; "
+                f"**{_psel['strains'][0]:,}** strains &nbsp;·&nbsp; "
+                f"**{_psel['genes'][0]:,}** genes &nbsp;·&nbsp; "
+                f"_{_psel['categories'][0] or 'no category'}_"
+            ),
+            mo.md("**Genes most associated with this phenotype**"),
+            mo.ui.table(
+                _genes,
+                selection=None,
+                page_size=8,
+                format_mapping={
+                    "mgi_id": lambda v: mo.md(f"[{v}]({mgi_url(v)})" if v else "—"),
+                    "gene_symbol": lambda v: mo.md(f"[{v}]({ncbi_url(v)})"),
+                },
+            ),
+            mo.md("**Strains showing it**"),
+            mo.ui.table(
+                _strains,
+                selection=None,
+                page_size=10,
+                format_mapping={
+                    "rrid": lambda v: mo.md(
+                        f"[{v}](https://scicrunch.org/resolver/{v})" if v else "—"
+                    ),
+                    "SDS_URL": lambda v: mo.md(f"[data sheet]({v})" if v else "—"),
+                },
+            ),
+        ])
+
+    _output
+    return
+
+
+@app.cell
+def _(
+    catalog,
+    mo,
+    mp_labels,
+    mp_repair_stats,
+    mp_rollup,
+    phenotype_index,
+    pl,
+    strain_phenotypes,
+):
+    _s = mp_repair_stats
+    _all_strains = catalog["STRAIN/STOCK_ID"].n_unique()
+    _ann_ids = strain_phenotypes["strain_id"].unique().to_list()
+    _ann = len(_ann_ids)
+
+    _mut = (
+        catalog.filter(pl.col("STRAIN/STOCK_ID").is_in(_ann_ids))
+        .group_by("STRAIN/STOCK_ID")
+        .agg(pl.col("MUTATION_TYPE").drop_nulls().unique().sort().str.join("+").alias("mut"))
+        .group_by("mut")
+        .agg(pl.len().alias("n"))
+    )
+    _tm = _mut.filter(pl.col("mut") == "TM")["n"].sum()
+    _ci = _mut.filter(pl.col("mut") == "CI")["n"].sum()
+    _top2 = phenotype_index.head(2)
+
+    mo.md(f"""
+    ## Things worth knowing about the phenotype data
+
+    **1. One in seven annotations points at the wrong term — this notebook repairs
+    them.** MMRRC's export splits any label containing a comma, so `decreased
+    CD4-positive, alpha-beta T cell number` arrives as two entries. From the first
+    split onward, every remaining label in that strain's list is paired with the
+    *next* term's id. The evidence is the collapse in label/id agreement either side
+    of the split point:
+
+    | Position in a strain's list | Label matches the id it was given |
+    |---|---|
+    | before the first split | {_s["pre_ok"]:,} of {_s["pre_n"]:,} ({_s["pre_ok"] / max(_s["pre_n"], 1):.1%}) |
+    | **after** the first split | {_s["post_ok"]:,} of {_s["post_n"]:,} (**{_s["post_ok"] / max(_s["post_n"], 1):.1%}**) |
+
+    It is an off-by-one chain, each label carrying the previous entry's id:
+
+    | Label in the file | Id the file gives it | …which is really | Correct id |
+    |---|---|---|---|
+    | `increased pro-B cell number` | MP:0008547 | abnormal neocortex morphology | **MP:0008186** |
+    | `abnormal neocortex morphology` | MP:0008869 | anovulation | **MP:0008547** |
+    | `anovulation` | MP:0008882 | abnormal enterocyte physiology | **MP:0008869** |
+
+    {_s["split_strains"]:,} of {_s["strains"]:,} annotated strains are affected.
+    Rejoining the split labels and resolving each against the ontology re-pointed
+    **{_s["corrected"]:,} of {_s["entries"]:,} entries
+    ({_s["corrected"] / _s["entries"]:.1%})**. {_s["by_label"] / _s["entries"]:.1%}
+    resolve by label or exact synonym; {_s["by_id_specific"]:,} keep the file's id
+    because it is *more* specific than a truncated label (`prenatal lethality` where
+    the file means `prenatal lethality, complete penetrance` — safe only before the
+    first split, where the ids are still aligned); {_s["by_id"]:,} fall back to the
+    file's id because the label no longer resolves at all (terms MP has retired), and
+    {_s["unresolved"]:,} are unresolved.
+
+    **2. MMRRC's labels are a stale snapshot.** Every id in the column is a real MP
+    term, but the labels have drifted — `aggression towards males` is now `aggression
+    towards male mice`, `reduced long term potentiation` is now `reduced long-term
+    potentiation`, `altered response to myocardial infarction` is now `abnormal
+    response to cardiac infarction`. Resolution therefore matches `rdfs:label` *and*
+    `oboInOwl:hasExactSynonym`, and every table above shows the ontology's label
+    rather than the catalog's.
+
+    **3. Phenotype coverage is thin and skewed.** Only **{_ann:,} of
+    {_all_strains:,} strains ({_ann / _all_strains:.1%})** carry any phenotype, and
+    they lean toward deliberately characterised lines — {_tm:,} purely
+    targeted-mutation strains against {_ci:,} chemically-induced, in a catalog whose
+    largest single group is gene traps. Only
+    {strain_phenotypes["mp_id"].n_unique():,} of {len(mp_labels):,} MP terms
+    ({strain_phenotypes["mp_id"].n_unique() / len(mp_labels):.0%}) are used at all.
+    Absence of a phenotype here means absence of *characterisation*, never absence of
+    an effect.
+
+    **4. The second most common "phenotype" is the absence of one.**
+    `{_top2["label"][1]}` ({_top2["mp_id"][1]}) sits on {_top2["strains"][1]:,}
+    strains, just behind `{_top2["label"][0]}` at {_top2["strains"][0]:,}. It is a
+    negative result, not a phenotype. It is left in the table — the ontology files it
+    under *normal phenotype*, so the category column flags it — but any ranking that
+    treats it as a finding is wrong.
+
+    **5. Categories overlap by design.** MP is a DAG, not a tree:
+    {mp_rollup.height:,} term→category edges across
+    {mp_rollup["mp_id"].n_unique():,} terms, a mean of
+    {mp_rollup.height / mp_rollup["mp_id"].n_unique():.2f} categories per term and up
+    to 5. One strain with one phenotype can count toward several categories, so the
+    category table's columns never sum to the totals.
     """)
     return
 
