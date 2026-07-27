@@ -1,0 +1,9 @@
+[project]
+name = "mmrrc"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "marimo[recommended]>=0.23.15",
+]

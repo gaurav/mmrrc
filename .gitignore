@@ -1,3 +1,8 @@
+# /data/ is scratch space, except the compressed catalog + ontology, which
+# CI needs in order to build the published notebook.
+/data/*
+!/data/*.gz
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -216,3 +221,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Built by the Pages workflow
+/_site/
