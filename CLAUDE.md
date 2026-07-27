@@ -3,6 +3,55 @@
 This project is a hackathon involving the MMRRC (Mutant Mouse Resource &
 Research Centers, https://www.mmrrc.org/). We'll flesh out these notes as we go.
 
+## The MMRRC catalog dataset
+
+`data/mmrrc_catalog_data.csv` (gitignored, ~147 MB) was downloaded from
+https://www.mmrrc.org/methods/data_download.php. 588,980 rows × 18 columns.
+
+Header note: `RESEARCH_AREAS ` has a trailing space in the file. Strip it on
+load with `pl.read_csv(path).rename(str.strip)`.
+
+### Grain: one row per (strain, allele, gene) — *not* per strain
+
+`STRAIN/STOCK_ID` is **not** unique: 69,388 distinct strains over 588,980 rows
+(~8.5 rows/strain, no nulls). Strain-level fields are repeated verbatim on every
+row of a strain; only the gene columns vary.
+
+For example `MMRRC:042022-MU` has 206 rows in which `STRAIN/STOCK_DESIGNATION`,
+`OTHER_NAMES`, `MGI_ALLELE_ACCESSION_ID`, `ALLELE_SYMBOL`, `MPT_IDS`,
+`PUBMED_IDS` and `SDS_URL` are all constant, while `GENE_SYMBOL`, `GENE_NAME`
+and `MGI_GENE_ACCESSION_ID` take 206 distinct values across 20 chromosomes — a
+lesion spanning many genes.
+
+Alleles per strain: 37,418 strains have 1, 19,699 have 2, 12,150 have 3, and
+121 have 4–7. 28,329 strains are a single row.
+
+**Consequence: any per-strain count taken off the raw frame is inflated.** Use
+`catalog.unique(subset=["STRAIN/STOCK_ID"])` for strain-level questions, and
+treat the raw frame as the strain↔gene edge list.
+
+`(STRAIN/STOCK_ID, ALLELE_SYMBOL, GENE_SYMBOL)` is *nearly* a key — 97 violating
+groups covering 229 rows. All of them have both allele and gene null; within
+those groups only `MUTATION_TYPE` and `CHROMOSOME` ever differ, and 82 rows are
+byte-identical duplicates.
+
+### Column sparsity (nulls out of 588,980)
+
+| Column | Nulls |
+|---|---|
+| `MPT_IDS` | 578,098 |
+| `MGI_ALLELE_ACCESSION_ID` | 544,820 |
+| `PUBMED_IDS` | 490,125 |
+| `MGI_GENE_ACCESSION_ID` | 60,220 |
+| `GENE_SYMBOL` | 54,923 |
+| `OTHER_NAMES` | 0 |
+
+Cross-reference columns of interest: `MGI_GENE_ACCESSION_ID`,
+`MGI_ALLELE_ACCESSION_ID`, `PUBMED_IDS`, `MPT_IDS`, `SDS_URL`, and `OTHER_NAMES`
+(which carries the `RRID:MMRRC_*` identifier).
+
+---
+
 Below: notes on working with marimo, carried over from earlier pairing sessions.
 
 ## Editing the live notebook
