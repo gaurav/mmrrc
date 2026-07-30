@@ -626,11 +626,17 @@ matter, all of them load-bearing:
 
 - **Data comes over the network in WASM.** `data_bytes(name)` returns the local
   `../data/<name>` if it exists and otherwise fetches
-  `https://raw.githubusercontent.com/gaurav/mmrrc/main/data/<name>` — via
+  `https://cdn.jsdelivr.net/gh/gaurav/mmrrc@main/data/<name>` — via
   `pyodide.http.pyfetch` under `sys.platform == "emscripten"` (Pyodide's `urllib`
-  can't reach the network), else `urllib.request`. raw.githubusercontent.com sends
-  `access-control-allow-origin: *`, so the cross-origin fetch is allowed.
-  **The URL pins `main`, so a data change only reaches the site once it lands there.**
+  can't reach the network), else `urllib.request`. `pyfetch` returns the error
+  page's body on a 404 instead of raising, so the WASM branch calls
+  `raise_for_status()`; `urlopen` already raises.
+  jsDelivr over raw.githubusercontent.com for the cache: both send
+  `access-control-allow-origin: *`, but raw sends `max-age=300`, so every visit
+  re-downloaded all 21 MB, while jsDelivr sends a week. **Two consequences of
+  pinning `@main`: a data change has to land on `main` first, and then waits out
+  jsDelivr's 12h edge cache.** jsDelivr caps `/gh/` files at 20 MB and
+  `mmrrc_catalog_data.csv.gz` is at 16 MB — if it outgrows that, raw still works.
 - **`pl.read_csv` goes through pyarrow in WASM.** polars' own CSV reader isn't
   built for emscripten; marimo silently falls back to `pyarrow.csv`, which is why
   the script header carries `pyarrow; sys_platform == 'emscripten'`. That fallback

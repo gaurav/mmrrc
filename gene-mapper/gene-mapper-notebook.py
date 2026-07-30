@@ -47,15 +47,21 @@ def _():
 
 @app.cell
 def _(Path, pl, re, sys, urllib):
-    DATA_URL = "https://raw.githubusercontent.com/gaurav/mmrrc/main/data/"
+    # jsDelivr rather than raw.githubusercontent.com: same files, same
+    # `access-control-allow-origin: *`, but cached for a week in the browser
+    # instead of five minutes, so a repeat visit doesn't re-fetch 21 MB. The
+    # cost is propagation -- the edge holds `@main` for 12h, so a data change
+    # takes that long to reach the site. jsDelivr caps /gh/ files at 20 MB and
+    # the catalog is at 16 MB; if it outgrows that, go back to
+    # https://raw.githubusercontent.com/gaurav/mmrrc/main/data/.
+    DATA_URL = "https://cdn.jsdelivr.net/gh/gaurav/mmrrc@main/data/"
 
 
     async def data_bytes(name):
-        """The named file from `data/`, local copy if there is one, else GitHub raw.
+        """The named file from `data/`, local copy if there is one, else the CDN.
 
         The WASM build has neither the repo checkout nor a working urllib, so it
-        fetches through the browser instead. raw.githubusercontent.com sends
-        `access-control-allow-origin: *`, so the cross-origin fetch is allowed.
+        fetches through the browser instead.
         """
         _local = Path("../data") / name
         if _local.exists():
