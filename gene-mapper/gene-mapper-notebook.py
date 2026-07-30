@@ -63,7 +63,12 @@ def _(Path, pl, re, sys, urllib):
         if sys.platform == "emscripten":
             from pyodide.http import pyfetch
 
-            return await (await pyfetch(DATA_URL + name)).bytes()
+            # pyfetch hands back the error page's body on a 404 rather than
+            # raising, which would surface three cells later as "not a gzipped
+            # file". urlopen already raises on its own.
+            _resp = await pyfetch(DATA_URL + name)
+            _resp.raise_for_status()
+            return await _resp.bytes()
         return urllib.request.urlopen(DATA_URL + name).read()
 
 
@@ -78,7 +83,7 @@ def _(Path, pl, re, sys, urllib):
         """
         return pl.Series(
             series.name,
-            [re.findall(pattern, _v) if _v else None for _v in series],
+            [re.findall(pattern, _v) if _v is not None else None for _v in series],
             dtype=pl.List(pl.String),
         )
     return data_bytes, extract_all
