@@ -75,7 +75,8 @@ def _(Path, pl, re, sys, urllib):
             _resp = await pyfetch(DATA_URL + name)
             _resp.raise_for_status()
             return await _resp.bytes()
-        return urllib.request.urlopen(DATA_URL + name).read()
+        with urllib.request.urlopen(DATA_URL + name) as _resp:
+            return _resp.read()
 
 
     def extract_all(series, pattern):
