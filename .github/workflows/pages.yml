@@ -1,0 +1,49 @@
+name: Publish notebook to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen
+
+      # html-wasm ships the notebook's source and runs it in the browser under
+      # Pyodide, so the tables stay interactive. Nothing runs at build time and
+      # no data is bundled: the notebook fetches data/*.gz from
+      # raw.githubusercontent.com when the page loads.
+      - name: Export notebook
+        working-directory: gene-mapper
+        run: uv run marimo export html-wasm gene-mapper-notebook.py -o ../_site --mode run
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

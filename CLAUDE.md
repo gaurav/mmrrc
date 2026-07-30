@@ -596,23 +596,71 @@ multiple CRFs.
 
 `__marimo__/session/` is ephemeral — it is gitignored. Do not commit it.
 
-## Exporting for GitHub — tried, abandoned
+## Publishing: `html-wasm` on GitHub Pages
 
-`gene-mapper-notebook.py` is the only copy of the notebook. Two export routes
-were tried and both were deleted; don't rebuild them without a new idea.
+`.github/workflows/pages.yml` exports the notebook with
 
-- **`marimo export ipynb --include-outputs`** → `gene-mapper/gene-mapper-notebook.ipynb`.
-  Every `mo.md` cell survives, but `mo.ui.table` / `mo.ui.multiselect` render as
-  `<marimo-table>` / `<marimo-multiselect>` custom elements with their data in
-  `data-*` attributes and **no fallback content** — GitHub strips them and shows
-  nothing, so the tables vanish rather than degrading to static ones. Also a
-  generated artifact nothing regenerates automatically, so it goes stale silently.
-- **`marimo export html` published to GitHub Pages** (`.github/workflows/pages.yml`,
-  www.ggvaidya.com/mmrrc). Tables render, but baked static — no sorting, filtering
-  or selection, which is most of the point of them.
+```bash
+marimo export html-wasm gene-mapper-notebook.py -o ../_site --mode run
+```
 
-`marimo export md` has no `--include-outputs` at all — source-only, so the
-narrative appears as code. Worse than either.
+and deploys it to www.ggvaidya.com/mmrrc. The export ships the notebook *source*
+plus a Pyodide runtime, so the browser runs every cell and the tables stay fully
+interactive — search, sort, paginate, select. Nothing runs at build time and no
+data is bundled; the export takes seconds and needs no `data/`.
 
-`marimo export html-wasm` is the untried option that would keep the widgets live;
-it ships a Pyodide runtime and would need the data files fetchable client-side.
+Two dead ends before this, don't retry them:
+
+- **`marimo export ipynb --include-outputs`**. `mo.ui.table` / `mo.ui.multiselect`
+  serialise as `<marimo-table>` / `<marimo-multiselect>` custom elements with
+  their data in `data-*` attributes and **no fallback content** — GitHub strips
+  them, so the tables vanish rather than degrading to static ones.
+- **`marimo export html`**. Tables render but are baked static: no sorting,
+  filtering or selection. `marimo export md` is worse still — no
+  `--include-outputs` at all, so the narrative appears as source.
+
+### Running the same notebook in the browser
+
+The notebook has to work under both CPython and Pyodide. Three things that
+matter, all of them load-bearing:
+
+- **Data comes over the network in WASM.** `data_bytes(name)` returns the local
+  `../data/<name>` if it exists and otherwise fetches
+  `https://raw.githubusercontent.com/gaurav/mmrrc/main/data/<name>` — via
+  `pyodide.http.pyfetch` under `sys.platform == "emscripten"` (Pyodide's `urllib`
+  can't reach the network), else `urllib.request`. raw.githubusercontent.com sends
+  `access-control-allow-origin: *`, so the cross-origin fetch is allowed.
+  **The URL pins `main`, so a data change only reaches the site once it lands there.**
+- **`pl.read_csv` goes through pyarrow in WASM.** polars' own CSV reader isn't
+  built for emscripten; marimo silently falls back to `pyarrow.csv`, which is why
+  the script header carries `pyarrow; sys_platform == 'emscripten'`. That fallback
+  reads a buffer, not a path, so it can't sniff gzip — hence the explicit
+  `gzip.decompress` before the read.
+  Then the trap: **`str.extract_all` on any frame derived from that pyarrow-read
+  catalog panics with `PanicException: capacity overflow`** — including a 4,604-row
+  filtered slice, and `rechunk()` does not help. Rebuilding the column through
+  Python is fine, so the `extract_all()` helper next to `data_bytes` does the
+  regex with `re.findall`. Only `extract_all` is affected; `str.extract`,
+  `str.contains`, `str.join`, `group_by`, `unique` and friends are all fine.
+- **polars in Pyodide is older than the local one.** `DataFrame.explode` has no
+  `empty_as_null` there; `.explode(col).drop_nulls(col)` means the same thing and
+  works in both. Expect more of these — the pyodide-distributed version is
+  whatever Pyodide shipped, and pinning it higher in the script header can't
+  change that.
+
+### Checking it actually runs
+
+The export succeeding proves nothing: every failure above happened at page load,
+in the browser, with a green build. Serve the export and drive it headlessly:
+
+```bash
+python -m http.server --directory <export-dir>
+uvx --from playwright playwright install chromium   # once
+```
+
+then a Playwright script that loads the page, waits for a marker string
+(`588,980`), and prints console messages. Cell exceptions arrive as console logs
+tagged `[STDERR] … (cellId)` with a full Python traceback, which is the only
+place the real error appears — the page itself just shows an empty cell. Boot to
+catalog-loaded is ~10 s. Cells behind a table selection (the gene detail panel)
+never run until something is selected, so click a row before believing them.
