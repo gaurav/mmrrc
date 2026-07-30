@@ -5,7 +5,7 @@ Upstream files this project analyses, committed here so results stay reproducibl
 releases every few weeks — so anything derived from them is a snapshot. Record the
 download date whenever you refresh these.
 
-Files are stored gzipped: together they are 21 MB compressed against 237 MB raw,
+Files are stored gzipped: together they are ~21 MB compressed against ~248 MB raw (~237 MiB),
 which is what makes committing them practical. Nothing needs unpacking —
 `polars.read_csv` reads `.csv.gz` natively, and the ontology is parsed through
 `gzip.open`.
