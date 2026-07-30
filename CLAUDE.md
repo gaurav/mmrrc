@@ -293,15 +293,15 @@ needs to track.
 Use paths relative to the notebook's own directory:
 
 ```python
-DATA_CSV = Path("../data/some-file.csv")
+DATA_CSV = Path("../downloaded/some-file.csv")
 ```
 
 Never use absolute paths — they break portability.
 
 The marimo **kernel's working directory is the notebook file's own directory**
-(where `marimo edit` was launched), so relative paths resolve from there. For a
-notebook one level down (e.g. `notebooks/`), a repo-root `data/` dir is
-`../data/`. Confirm with `Path(...).exists()` in the kernel if unsure.
+(where `marimo edit` was launched), so relative paths resolve from there. The
+notebook lives in `gene-mapper/`, so the repo-root `downloaded/` dir is
+`../downloaded/`. Confirm with `Path(...).exists()` in the kernel if unsure.
 
 ## Editing cells programmatically with `marimo._code_mode`
 
@@ -598,29 +598,89 @@ multiple CRFs.
 
 `__marimo__/session/` is ephemeral — it is gitignored. Do not commit it.
 
-## Exporting for GitHub
+## Publishing: `html-wasm` on GitHub Pages
 
-`gene-mapper/gene-mapper-notebook.ipynb` is a generated artifact, regenerated with:
+`.github/workflows/pages.yml` exports the notebook with
 
 ```bash
-cd gene-mapper && marimo export ipynb gene-mapper-notebook.py \
-  -o gene-mapper-notebook.ipynb --include-outputs --force
+marimo export html-wasm gene-mapper-notebook.py -o ../_site --mode run
 ```
 
-**Regenerate it after any change to the notebook** — nothing does this
-automatically, so it goes stale silently. It needs `data/` present, since
-`--include-outputs` actually runs the notebook (~4s).
+and deploys it to www.ggvaidya.com/mmrrc. The export ships the notebook *source*
+plus a Pyodide runtime, so the browser runs every cell and the tables stay fully
+interactive — search, sort, paginate, select. Nothing runs at build time; the
+export takes seconds. A second workflow step copies `downloaded/` into `_site/`,
+so the data the page loads is the data that deploy shipped.
 
-What survives on GitHub: every `mo.md` cell, which is where the analysis and all
-the findings live. What does not: `mo.ui.table` and `mo.ui.multiselect` render as
-`<marimo-table>` / `<marimo-multiselect>` custom elements holding their data in
-`data-*` attributes, with no fallback content — GitHub strips them and shows
-nothing. Cells that mix prose and a widget in one `mo.vstack` keep the prose and
-lose the widget.
+Two dead ends before this, don't retry them:
 
-`marimo export md` has **no** `--include-outputs` option — it is a source-only
-export, so the `mo.md(...)` narrative appears as code rather than rendered prose.
-Worse than the ipynb for this purpose.
+- **`marimo export ipynb --include-outputs`**. `mo.ui.table` / `mo.ui.multiselect`
+  serialise as `<marimo-table>` / `<marimo-multiselect>` custom elements with
+  their data in `data-*` attributes and **no fallback content** — GitHub strips
+  them, so the tables vanish rather than degrading to static ones.
+- **`marimo export html`**. Tables render but are baked static: no sorting,
+  filtering or selection. `marimo export md` is worse still — no
+  `--include-outputs` at all, so the narrative appears as source.
 
-For a fully interactive published copy, `marimo export html-wasm` on GitHub Pages
-is the option; nothing in-repo will render the widgets.
+### Running the same notebook in the browser
+
+The notebook has to work under both CPython and Pyodide. Three things that
+matter, all of them load-bearing:
+
+- **Data comes over the network in WASM, from the site itself.** `data_bytes(name)`
+  returns `../downloaded/<name>` when that file exists (any checkout — the `.gz`
+  files are tracked) and otherwise fetches the same relative path with
+  `pyodide.http.pyfetch`. **`DATA_DIR = "../downloaded/"` is one string doing two
+  jobs**, a filesystem path under CPython and a URL under Pyodide, and it only
+  works because the marimo kernel runs from `<site>/assets/worker-*.js` — so
+  `../downloaded/` lands on `<site>/downloaded/` both at a server root and under
+  `/mmrrc/`. That one level of nesting is load-bearing: a bare `downloaded/`
+  resolves inside `assets/` and 404s, and `/downloaded/` only works at a domain
+  root. Verified in a browser (see below); don't "simplify" it from reading alone.
+  `pyfetch` returns the error page's body on a 404 instead of raising, so the
+  WASM branch calls `raise_for_status()` — otherwise a missing file arrives as
+  "not a gzipped file" three cells later.
+  There is no network fallback under CPython, deliberately: the files are in git,
+  so a missing one is a broken checkout and says so.
+  **Serving from Pages rather than a CDN** (jsDelivr and raw.githubusercontent.com
+  were both tried) means the data is versioned with the deploy instead of pinned
+  to whatever `main` held when a CDN last cached it, needs no CORS, and dodges
+  jsDelivr's 20 MB per-file cap — `mmrrc_catalog_data.csv.gz` is at 16 MB and
+  growing. Pages sends `max-age=600`, shorter than jsDelivr's week, but it sends
+  an `ETag`, so a repeat visit revalidates and gets a 304 with an empty body
+  rather than re-downloading 21 MB.
+- **`pl.read_csv` goes through pyarrow in WASM.** polars' own CSV reader isn't
+  built for emscripten; marimo silently falls back to `pyarrow.csv`, which is why
+  the script header carries `pyarrow; sys_platform == 'emscripten'`. That fallback
+  reads a buffer, not a path, so it can't sniff gzip — hence the explicit
+  `gzip.decompress` before the read.
+  Then the trap: **`str.extract_all` on any frame derived from that pyarrow-read
+  catalog panics with `PanicException: capacity overflow`** — including a 4,604-row
+  filtered slice, and `rechunk()` does not help. Rebuilding the column through
+  Python is fine, so the `extract_all()` helper next to `data_bytes` does the
+  regex with `re.findall`. Only `extract_all` is affected; `str.extract`,
+  `str.contains`, `str.join`, `group_by`, `unique` and friends are all fine.
+- **polars in Pyodide is older than the local one.** This surfaced as
+  `DataFrame.explode` having no `empty_as_null` there — the notebook no longer
+  calls `explode` at all (the phenotype pairs are built in the same Python loop
+  that works around `extract_all`), but expect more of these. The
+  pyodide-distributed version is whatever Pyodide shipped, and pinning it higher
+  in the script header can't change that. Keep to the older API where the two
+  spellings mean the same thing.
+
+### Checking it actually runs
+
+The export succeeding proves nothing: every failure above happened at page load,
+in the browser, with a green build. Serve the export and drive it headlessly:
+
+```bash
+python -m http.server --directory <export-dir>
+uvx --from playwright playwright install chromium   # once
+```
+
+then a Playwright script that loads the page, waits for a marker string
+(`588,980`), and prints console messages. Cell exceptions arrive as console logs
+tagged `[STDERR] … (cellId)` with a full Python traceback, which is the only
+place the real error appears — the page itself just shows an empty cell. Boot to
+catalog-loaded is ~10 s. Cells behind a table selection (the gene detail panel)
+never run until something is selected, so click a row before believing them.

@@ -10,6 +10,14 @@ which is what makes committing them practical. Nothing needs unpacking —
 `polars.read_csv` reads `.csv.gz` natively, and the ontology is parsed through
 `gzip.open`.
 
+**This directory is published, not just committed.** `.github/workflows/pages.yml`
+copies it into the GitHub Pages site, so these exact files are served from
+<https://www.ggvaidya.com/mmrrc/downloaded/> — including this README, which is the
+provenance record for whatever snapshot the live page is running against. The
+notebook fetches them from there when it runs in the browser, so the data a
+visitor sees is the data that deploy shipped. A refresh reaches the site only via
+a commit to `main` and a deploy.
+
 ## `mmrrc_catalog_data.csv.gz`
 
 The full MMRRC strain catalog.
