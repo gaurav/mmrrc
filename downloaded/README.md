@@ -68,9 +68,9 @@ The file is RDF/XML and much larger than MP alone, because it merges its imports
 
 ```bash
 curl -sSL https://www.mmrrc.org/about/mmrrc_catalog_data.csv \
-  | gzip -9 > downloaded/mmrrc_catalog_data.csv.gz
+  | gzip -9n > downloaded/mmrrc_catalog_data.csv.gz
 curl -sSL https://www.informatics.jax.org/downloads/reports/mp.owl \
-  | gzip -9 > downloaded/mp.owl.gz
+  | gzip -9n > downloaded/mp.owl.gz
 ```
 
 Then update the dates, sizes, checksums and counts in this file. The figures above
