@@ -2,6 +2,10 @@
 # requires-python = ">=3.13"
 # dependencies = [
 #     "marimo>=0.23.15",
+#     "polars>=1.0",
+#     # In WASM, marimo routes pl.read_csv through pyarrow -- polars' own CSV
+#     # reader isn't available there.
+#     "pyarrow; sys_platform == 'emscripten'",
 # ]
 # ///
 
@@ -16,21 +20,80 @@ def _():
     import marimo as mo
     import polars as pl
     import gzip
+    import io
     import re
+    import sys
+    import urllib.request
     import xml.etree.ElementTree as ET
     from collections import defaultdict, deque
     from pathlib import Path
     from urllib.parse import quote_plus
 
-    return ET, Path, defaultdict, deque, gzip, mo, pl, quote_plus, re
+    return (
+        ET,
+        Path,
+        defaultdict,
+        deque,
+        gzip,
+        io,
+        mo,
+        pl,
+        quote_plus,
+        re,
+        sys,
+        urllib,
+    )
 
 
 @app.cell
-def _(Path, mo, pl):
-    CATALOG_CSV = Path("../data/mmrrc_catalog_data.csv.gz")
+def _(Path, pl, re, sys, urllib):
+    DATA_URL = "https://raw.githubusercontent.com/gaurav/mmrrc/main/data/"
 
-    catalog = pl.read_csv(CATALOG_CSV).rename(str.strip)
-    mo.md(f"**{CATALOG_CSV.name}**: {catalog.height:,} rows x {catalog.width} columns")
+
+    async def data_bytes(name):
+        """The named file from `data/`, local copy if there is one, else GitHub raw.
+
+        The WASM build has neither the repo checkout nor a working urllib, so it
+        fetches through the browser instead. raw.githubusercontent.com sends
+        `access-control-allow-origin: *`, so the cross-origin fetch is allowed.
+        """
+        _local = Path("../data") / name
+        if _local.exists():
+            return _local.read_bytes()
+        if sys.platform == "emscripten":
+            from pyodide.http import pyfetch
+
+            return await (await pyfetch(DATA_URL + name)).bytes()
+        return urllib.request.urlopen(DATA_URL + name).read()
+
+
+    def extract_all(series, pattern):
+        """Every match of `pattern` per row, as a List column.
+
+        Not `pl.col(...).str.extract_all`: in WASM the catalog is read through
+        pyarrow (polars' own CSV reader isn't built for it), and extract_all on a
+        column backed by an arrow buffer panics with "capacity overflow". Both
+        columns this is used on have a few thousand non-null rows, so Python's
+        `re` is fast enough and behaves identically in both environments.
+        """
+        return pl.Series(
+            series.name,
+            [re.findall(pattern, _v) if _v else None for _v in series],
+            dtype=pl.List(pl.String),
+        )
+    return data_bytes, extract_all
+
+
+@app.cell
+async def _(data_bytes, gzip, mo, pl):
+    CATALOG_CSV = "mmrrc_catalog_data.csv.gz"
+
+    # Decompress here rather than handing polars the .gz: in WASM the read goes
+    # through pyarrow, which won't sniff gzip out of an in-memory buffer.
+    catalog = pl.read_csv(gzip.decompress(await data_bytes(CATALOG_CSV))).rename(
+        str.strip
+    )
+    mo.md(f"**{CATALOG_CSV}**: {catalog.height:,} rows x {catalog.width} columns")
     return (catalog,)
 
 
@@ -287,6 +350,7 @@ def _(chrom_table, gene_index, mgi_url, mo, pl):
 @app.cell
 def _(
     catalog_genes,
+    extract_all,
     gene_table,
     mgi_url,
     mo,
@@ -316,18 +380,18 @@ def _(
             .sort("strains", descending=True)
         )
 
+        _base = _rows.unique(subset=["STRAIN/STOCK_ID"]).join(
+            strain_alleles.group_by("STRAIN/STOCK_ID").agg(
+                pl.col("ALLELE_SYMBOL").unique().sort().str.join(", ").alias("alleles")
+            ),
+            on="STRAIN/STOCK_ID",
+            how="left",
+        )
+
         _strains = (
-            _rows.unique(subset=["STRAIN/STOCK_ID"])
-            .join(
-                strain_alleles.group_by("STRAIN/STOCK_ID").agg(
-                    pl.col("ALLELE_SYMBOL").unique().sort().str.join(", ").alias("alleles")
-                ),
-                on="STRAIN/STOCK_ID",
-                how="left",
-            )
-            .with_columns(
+            _base.with_columns(
                 pl.col("OTHER_NAMES").str.extract(r"(RRID:MMRRC_[\w.-]+)").alias("rrid"),
-                pl.col("PUBMED_IDS").str.extract_all(r"\d{6,9}").alias("_pmids"),
+                extract_all(_base["PUBMED_IDS"], r"\d{6,9}").alias("_pmids"),
             )
             .select([
                 "STRAIN/STOCK_ID", "STRAIN/STOCK_DESIGNATION", "alleles",
@@ -468,8 +532,8 @@ def _(mo):
 
 
 @app.cell
-def _(ET, Path, defaultdict, deque, gzip, mo, pl):
-    MP_OWL = Path("../data/mp.owl.gz")
+async def _(ET, data_bytes, defaultdict, deque, gzip, io, mo, pl):
+    MP_OWL = "mp.owl.gz"
     MP_ROOT = "MP:0000001"
 
     _OBO = "http://purl.obolibrary.org/obo/"
@@ -484,7 +548,7 @@ def _(ET, Path, defaultdict, deque, gzip, mo, pl):
     # One streaming pass over 101 MB of RDF/XML (5 MB gzipped), ~1.5s -- no ontology
     # library needed. Only clear owl:Class elements: clearing every element wipes
     # child text before the parent's end event can read it.
-    with gzip.open(MP_OWL) as _fh:
+    with gzip.open(io.BytesIO(await data_bytes(MP_OWL))) as _fh:
         for _ev, _el in ET.iterparse(_fh, events=("end",)):
             if _el.tag != _OWL + "Class":
                 continue
@@ -554,16 +618,24 @@ def _(catalog, mo, mp_labels, pl, re):
     # torn in two and the tail of the list is dropped. The ids are untouched: complete,
     # correctly ordered, and every one a valid MP term. Labels come from the ontology.
     # See https://github.com/gaurav/mmrrc/issues/1.
-    strain_phenotypes = (
-        catalog.filter(pl.col("MPT_IDS").is_not_null())
-        .unique(subset=["STRAIN/STOCK_ID"])
-        .select(
-            pl.col("STRAIN/STOCK_ID").alias("strain_id"),
-            pl.col("MPT_IDS").str.extract_all(r"MP:\d+").alias("mp_id"),
-        )
-        .explode("mp_id", empty_as_null=False)
-        .unique()
+    _annotated = catalog.filter(pl.col("MPT_IDS").is_not_null()).unique(
+        subset=["STRAIN/STOCK_ID"]
     )
+
+    # Built in Python rather than extract_all + explode: polars' extract_all panics
+    # on this frame under WASM (see the WASM notes in CLAUDE.md), and 46k pairs is
+    # nothing to iterate.
+    strain_phenotypes = pl.DataFrame(
+        [
+            (_sid, _mp)
+            for _sid, _ids in zip(
+                _annotated["STRAIN/STOCK_ID"], _annotated["MPT_IDS"]
+            )
+            for _mp in re.findall(r"MP:\d+", _ids)
+        ],
+        schema=["strain_id", "mp_id"],
+        orient="row",
+    ).unique()
 
     # Diagnostics for the highlights below: how badly the label half is mangled, and
     # confirmation that the ids are the intact half.
