@@ -596,29 +596,23 @@ multiple CRFs.
 
 `__marimo__/session/` is ephemeral — it is gitignored. Do not commit it.
 
-## Exporting for GitHub
+## Exporting for GitHub — tried, abandoned
 
-`gene-mapper/gene-mapper-notebook.ipynb` is a generated artifact, regenerated with:
+`gene-mapper-notebook.py` is the only copy of the notebook. Two export routes
+were tried and both were deleted; don't rebuild them without a new idea.
 
-```bash
-cd gene-mapper && marimo export ipynb gene-mapper-notebook.py \
-  -o gene-mapper-notebook.ipynb --include-outputs --force
-```
+- **`marimo export ipynb --include-outputs`** → `gene-mapper/gene-mapper-notebook.ipynb`.
+  Every `mo.md` cell survives, but `mo.ui.table` / `mo.ui.multiselect` render as
+  `<marimo-table>` / `<marimo-multiselect>` custom elements with their data in
+  `data-*` attributes and **no fallback content** — GitHub strips them and shows
+  nothing, so the tables vanish rather than degrading to static ones. Also a
+  generated artifact nothing regenerates automatically, so it goes stale silently.
+- **`marimo export html` published to GitHub Pages** (`.github/workflows/pages.yml`,
+  www.ggvaidya.com/mmrrc). Tables render, but baked static — no sorting, filtering
+  or selection, which is most of the point of them.
 
-**Regenerate it after any change to the notebook** — nothing does this
-automatically, so it goes stale silently. It needs `data/` present, since
-`--include-outputs` actually runs the notebook (~4s).
+`marimo export md` has no `--include-outputs` at all — source-only, so the
+narrative appears as code. Worse than either.
 
-What survives on GitHub: every `mo.md` cell, which is where the analysis and all
-the findings live. What does not: `mo.ui.table` and `mo.ui.multiselect` render as
-`<marimo-table>` / `<marimo-multiselect>` custom elements holding their data in
-`data-*` attributes, with no fallback content — GitHub strips them and shows
-nothing. Cells that mix prose and a widget in one `mo.vstack` keep the prose and
-lose the widget.
-
-`marimo export md` has **no** `--include-outputs` option — it is a source-only
-export, so the `mo.md(...)` narrative appears as code rather than rendered prose.
-Worse than the ipynb for this purpose.
-
-For a fully interactive published copy, `marimo export html-wasm` on GitHub Pages
-is the option; nothing in-repo will render the widgets.
+`marimo export html-wasm` is the untried option that would keep the widgets live;
+it ships a Pyodide runtime and would need the data files fetchable client-side.
