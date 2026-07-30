@@ -648,11 +648,13 @@ matter, all of them load-bearing:
   Python is fine, so the `extract_all()` helper next to `data_bytes` does the
   regex with `re.findall`. Only `extract_all` is affected; `str.extract`,
   `str.contains`, `str.join`, `group_by`, `unique` and friends are all fine.
-- **polars in Pyodide is older than the local one.** `DataFrame.explode` has no
-  `empty_as_null` there; `.explode(col).drop_nulls(col)` means the same thing and
-  works in both. Expect more of these — the pyodide-distributed version is
-  whatever Pyodide shipped, and pinning it higher in the script header can't
-  change that.
+- **polars in Pyodide is older than the local one.** This surfaced as
+  `DataFrame.explode` having no `empty_as_null` there — the notebook no longer
+  calls `explode` at all (the phenotype pairs are built in the same Python loop
+  that works around `extract_all`), but expect more of these. The
+  pyodide-distributed version is whatever Pyodide shipped, and pinning it higher
+  in the script header can't change that. Keep to the older API where the two
+  spellings mean the same thing.
 
 ### Checking it actually runs
 
