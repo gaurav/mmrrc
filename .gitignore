@@ -1,7 +1,5 @@
-# /data/ is scratch space, except the compressed catalog + ontology, which
-# CI needs in order to build the published notebook.
-/data/*
-!/data/*.gz
+# /data/ is scratch space. Tracked source downloads live in /downloaded/.
+/data/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -27,12 +27,17 @@ jobs:
       - run: uv sync --frozen
 
       # html-wasm ships the notebook's source and runs it in the browser under
-      # Pyodide, so the tables stay interactive. Nothing runs at build time and
-      # no data is bundled: the notebook fetches data/*.gz from
-      # raw.githubusercontent.com when the page loads.
+      # Pyodide, so the tables stay interactive. Nothing runs at build time.
       - name: Export notebook
         working-directory: gene-mapper
         run: uv run marimo export html-wasm gene-mapper-notebook.py -o ../_site --mode run
+
+      # The notebook fetches these from <site>/downloaded/ at page load. Shipping
+      # them with the export keeps the data same-origin and versioned with the
+      # deploy, instead of pointing the page at a CDN copy of some other commit.
+      # README.md rides along on purpose: it is the provenance record.
+      - name: Publish the source data alongside it
+        run: cp -R downloaded _site/downloaded
 
       - uses: actions/upload-pages-artifact@v3
         with:

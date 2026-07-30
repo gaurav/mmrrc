@@ -23,7 +23,6 @@ def _():
     import io
     import re
     import sys
-    import urllib.request
     import xml.etree.ElementTree as ET
     from collections import defaultdict, deque
     from pathlib import Path
@@ -41,42 +40,42 @@ def _():
         quote_plus,
         re,
         sys,
-        urllib,
     )
 
 
 @app.cell
-def _(Path, pl, re, sys, urllib):
-    # jsDelivr rather than raw.githubusercontent.com: same files, same
-    # `access-control-allow-origin: *`, but cached for a week in the browser
-    # instead of five minutes, so a repeat visit doesn't re-fetch 21 MB. The
-    # cost is propagation -- the edge holds `@main` for 12h, so a data change
-    # takes that long to reach the site. jsDelivr caps /gh/ files at 20 MB and
-    # the catalog is at 16 MB; if it outgrows that, go back to
-    # https://raw.githubusercontent.com/gaurav/mmrrc/main/data/.
-    DATA_URL = "https://cdn.jsdelivr.net/gh/gaurav/mmrrc@main/data/"
+def _(Path, pl, re, sys):
+    # Both spellings of the same location. Locally it is a path from
+    # gene-mapper/; in the browser it is a URL relative to the marimo kernel,
+    # which runs from <site>/assets/worker-*.js -- so `../downloaded/` is
+    # <site>/downloaded/, published next to the notebook by the Pages workflow.
+    # That one directory of nesting is load-bearing: a bare "downloaded/" would
+    # resolve inside assets/ and 404. Verified in a real browser, not assumed.
+    DATA_DIR = "../downloaded/"
 
 
     async def data_bytes(name):
-        """The named file from `data/`, local copy if there is one, else the CDN.
+        """The named file from `downloaded/`: the checkout's copy, else the site's.
 
-        The WASM build has neither the repo checkout nor a working urllib, so it
-        fetches through the browser instead.
+        The WASM build has no checkout, so it fetches the copy deployed alongside
+        the page. Same origin, so no CORS involved, and the data is whatever that
+        deploy shipped rather than whatever a CDN cached.
         """
-        _local = Path("../data") / name
+        _local = Path(DATA_DIR) / name
         if _local.exists():
             return _local.read_bytes()
-        if sys.platform == "emscripten":
-            from pyodide.http import pyfetch
+        if sys.platform != "emscripten":
+            raise FileNotFoundError(
+                f"{_local} is missing. It is tracked in git -- run the notebook "
+                f"from gene-mapper/ in a full checkout."
+            )
+        from pyodide.http import pyfetch
 
-            # pyfetch hands back the error page's body on a 404 rather than
-            # raising, which would surface three cells later as "not a gzipped
-            # file". urlopen already raises on its own.
-            _resp = await pyfetch(DATA_URL + name)
-            _resp.raise_for_status()
-            return await _resp.bytes()
-        with urllib.request.urlopen(DATA_URL + name) as _resp:
-            return _resp.read()
+        # pyfetch hands back the error page's body on a 404 rather than raising,
+        # which would surface three cells later as "not a gzipped file".
+        _resp = await pyfetch(DATA_DIR + name)
+        _resp.raise_for_status()
+        return await _resp.bytes()
 
 
     def extract_all(series, pattern):
@@ -529,7 +528,7 @@ def _(mo):
 
     > `decreased bone mineral density [MP:0000063]| abnormal vertebrae morphology [MP:0000137]| …`
 
-    This section cross-links them against `data/mp.owl`, the Mammalian Phenotype
+    This section cross-links them against `downloaded/mp.owl.gz`, the Mammalian Phenotype
     Ontology, to group phenotypes under their parent categories and see which areas
     of mouse biology the collection actually covers.
 

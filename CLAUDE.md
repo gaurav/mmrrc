@@ -5,8 +5,10 @@ Research Centers, https://www.mmrrc.org/). We'll flesh out these notes as we go.
 
 ## The MMRRC catalog dataset
 
-`data/mmrrc_catalog_data.csv` (gitignored, ~147 MB) was downloaded from
-https://www.mmrrc.org/methods/data_download.php. 588,980 rows × 18 columns.
+`downloaded/mmrrc_catalog_data.csv.gz` — 588,980 rows × 18 columns. Provenance,
+download dates and checksums for every source file live in
+[`downloaded/README.md`](downloaded/README.md); keep it current, since both
+upstream datasets evolve.
 
 Header note: `RESEARCH_AREAS ` has a trailing space in the file. Strip it on
 load with `pl.read_csv(path).rename(str.strip)`.
@@ -172,9 +174,9 @@ Watch for `MP:0002169` "no abnormal phenotype detected" — 442 strains, the sec
 most common entry. It is a negative result, not a phenotype. The ontology files
 it under *normal phenotype*, which is the cheapest way to spot it.
 
-### Parsing `data/mp.owl`
+### Parsing `downloaded/mp.owl.gz`
 
-101 MB RDF/XML (gitignored), 15,288 MP terms (457 obsolete) plus merged
+101 MB of RDF/XML (5.5 MB gzipped), 15,288 MP terms (457 obsolete) plus merged
 PATO/UBERON/GO/CHEBI/CL imports — 126,454 `owl:Class` elements in total.
 
 **No ontology library needed.** A single `xml.etree.ElementTree.iterparse` pass
@@ -291,15 +293,15 @@ needs to track.
 Use paths relative to the notebook's own directory:
 
 ```python
-DATA_CSV = Path("../data/some-file.csv")
+DATA_CSV = Path("../downloaded/some-file.csv")
 ```
 
 Never use absolute paths — they break portability.
 
 The marimo **kernel's working directory is the notebook file's own directory**
-(where `marimo edit` was launched), so relative paths resolve from there. For a
-notebook one level down (e.g. `notebooks/`), a repo-root `data/` dir is
-`../data/`. Confirm with `Path(...).exists()` in the kernel if unsure.
+(where `marimo edit` was launched), so relative paths resolve from there. The
+notebook lives in `gene-mapper/`, so the repo-root `downloaded/` dir is
+`../downloaded/`. Confirm with `Path(...).exists()` in the kernel if unsure.
 
 ## Editing cells programmatically with `marimo._code_mode`
 
@@ -606,8 +608,9 @@ marimo export html-wasm gene-mapper-notebook.py -o ../_site --mode run
 
 and deploys it to www.ggvaidya.com/mmrrc. The export ships the notebook *source*
 plus a Pyodide runtime, so the browser runs every cell and the tables stay fully
-interactive — search, sort, paginate, select. Nothing runs at build time and no
-data is bundled; the export takes seconds and needs no `data/`.
+interactive — search, sort, paginate, select. Nothing runs at build time; the
+export takes seconds. A second workflow step copies `downloaded/` into `_site/`,
+so the data the page loads is the data that deploy shipped.
 
 Two dead ends before this, don't retry them:
 
@@ -624,19 +627,28 @@ Two dead ends before this, don't retry them:
 The notebook has to work under both CPython and Pyodide. Three things that
 matter, all of them load-bearing:
 
-- **Data comes over the network in WASM.** `data_bytes(name)` returns the local
-  `../data/<name>` if it exists and otherwise fetches
-  `https://cdn.jsdelivr.net/gh/gaurav/mmrrc@main/data/<name>` — via
-  `pyodide.http.pyfetch` under `sys.platform == "emscripten"` (Pyodide's `urllib`
-  can't reach the network), else `urllib.request`. `pyfetch` returns the error
-  page's body on a 404 instead of raising, so the WASM branch calls
-  `raise_for_status()`; `urlopen` already raises.
-  jsDelivr over raw.githubusercontent.com for the cache: both send
-  `access-control-allow-origin: *`, but raw sends `max-age=300`, so every visit
-  re-downloaded all 21 MB, while jsDelivr sends a week. **Two consequences of
-  pinning `@main`: a data change has to land on `main` first, and then waits out
-  jsDelivr's 12h edge cache.** jsDelivr caps `/gh/` files at 20 MB and
-  `mmrrc_catalog_data.csv.gz` is at 16 MB — if it outgrows that, raw still works.
+- **Data comes over the network in WASM, from the site itself.** `data_bytes(name)`
+  returns `../downloaded/<name>` when that file exists (any checkout — the `.gz`
+  files are tracked) and otherwise fetches the same relative path with
+  `pyodide.http.pyfetch`. **`DATA_DIR = "../downloaded/"` is one string doing two
+  jobs**, a filesystem path under CPython and a URL under Pyodide, and it only
+  works because the marimo kernel runs from `<site>/assets/worker-*.js` — so
+  `../downloaded/` lands on `<site>/downloaded/` both at a server root and under
+  `/mmrrc/`. That one level of nesting is load-bearing: a bare `downloaded/`
+  resolves inside `assets/` and 404s, and `/downloaded/` only works at a domain
+  root. Verified in a browser (see below); don't "simplify" it from reading alone.
+  `pyfetch` returns the error page's body on a 404 instead of raising, so the
+  WASM branch calls `raise_for_status()` — otherwise a missing file arrives as
+  "not a gzipped file" three cells later.
+  There is no network fallback under CPython, deliberately: the files are in git,
+  so a missing one is a broken checkout and says so.
+  **Serving from Pages rather than a CDN** (jsDelivr and raw.githubusercontent.com
+  were both tried) means the data is versioned with the deploy instead of pinned
+  to whatever `main` held when a CDN last cached it, needs no CORS, and dodges
+  jsDelivr's 20 MB per-file cap — `mmrrc_catalog_data.csv.gz` is at 16 MB and
+  growing. Pages sends `max-age=600`, shorter than jsDelivr's week, but it sends
+  an `ETag`, so a repeat visit revalidates and gets a 304 with an empty body
+  rather than re-downloading 21 MB.
 - **`pl.read_csv` goes through pyarrow in WASM.** polars' own CSV reader isn't
   built for emscripten; marimo silently falls back to `pyarrow.csv`, which is why
   the script header carries `pyarrow; sys_platform == 'emscripten'`. That fallback
